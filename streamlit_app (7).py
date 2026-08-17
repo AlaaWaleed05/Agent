@@ -240,19 +240,20 @@ def save_gsheet_link(office, link):
         if not sheet:
             return False, "مش قادر أوصل لشيت الحسابات (accounts sheet) — تأكدي من صلاحيات الـ service account."
 
-        records = sheet.get_all_records()
         headers = sheet.row_values(1)
-
         target = str(office).strip()
+
+        # بندور صف صف على عمود "اسم المكتب" (العمود الأول) بدل get_all_records
+        # عشان نتجنب مشاكل الهيدرز الفاضية/المكررة
+        office_col_values = sheet.col_values(1)
         row_num = None
-        for i, r in enumerate(records, start=2):
-            existing = str(r.get("اسم المكتب", "")).strip()
-            if existing == target:
+        for i, val in enumerate(office_col_values[1:], start=2):  # صف 1 = هيدر
+            if str(val).strip() == target:
                 row_num = i
                 break
 
         if row_num is None:
-            all_names = [str(r.get("اسم المكتب", "")).strip() for r in records]
+            all_names = [str(v).strip() for v in office_col_values[1:]]
             return False, f"مش لاقي مكتب اسمه '{target}' في شيت الحسابات. الأسماء الموجودة فعلاً: {all_names}"
 
         # لو مفيش عمود للينك، ضيفيه (مع توسيع الشيت لو لازم)
@@ -281,14 +282,19 @@ def get_gsheet_link(office):
         headers = sheet.row_values(1)
         if "لينك الشيت" not in headers:
             return None
-        col_num = headers.index("لينك الشيت") + 1
-        records = sheet.get_all_records()
-        for r in records:
-            if str(r.get("اسم المكتب", "")).strip() == str(office).strip():
-                link = r.get("لينك الشيت", "")
+        link_col = headers.index("لينك الشيت") + 1
+
+        # بندور صف صف على عمود "اسم المكتب" (العمود الأول) بدل get_all_records
+        # عشان نتجنب مشاكل الهيدرز الفاضية/المكررة اللي ممكن تطلع استثناء صامت
+        office_col_values = sheet.col_values(1)
+        target = str(office).strip()
+        for i, val in enumerate(office_col_values[1:], start=2):  # صف 1 = هيدر
+            if str(val).strip() == target:
+                link = sheet.cell(i, link_col).value
                 return link if link else None
         return None
-    except:
+    except Exception as e:
+        print(f"خطأ في get_gsheet_link: {e}")
         return None
 
 
