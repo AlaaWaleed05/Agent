@@ -629,533 +629,443 @@ def find_excel_columns(ws):
 
 
 # ==================== الواجهة ====================
-
 st.set_page_config(
     menu_items={"Get help": None, "Report a bug": None, "About": None},
     page_title="ادرس في مصر - Agent",
     page_icon="🎓",
-    layout="centered"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
 st.markdown("""
 <style>
-    body { direction: rtl; }
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    [data-testid="stToolbar"] {visibility: hidden;}
-    [data-testid="stDecoration"] {visibility: hidden;}
-    [data-testid="stStatusWidget"] {visibility: hidden;}
-    .viewerBadge_container__r5tak {display: none;}
-    .styles_viewerBadge__CvC9N {display: none;}
-    #stDecoration {display: none;}
-    .stApp > header {display: none;}
-    [data-testid="stSidebarNav"] {display: none;}
-    .css-1jc7ptx, .e1ewe7hr3, .viewerBadge_container__1QSob,
-    .styles_viewerBadge__1yB5_, .viewerBadge_link__1S137,
-    .viewerBadge_text__1JaDK, div[class*="viewerBadge"],
-    div[class*="StatusWidget"], [data-testid="stBottom"] > div:last-child {display: none !important;}
+/* ===== Global ===== */
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap');
 
-    /* إخفاء رسالة "Press Enter to apply" اللي بتظهر تحت حقول الإدخال */
-    [data-testid="InputInstructions"] {display: none !important;}
-    div[data-baseweb="input"] + div small {display: none !important;}
+html, body, [class*="css"], .stApp {
+    font-family: 'Cairo', sans-serif !important;
+    direction: rtl;
+}
+.stApp { background: #f5f7fb; color: #111827; }
+[data-testid="stAppViewContainer"] > .main { background: #f5f7fb; }
+.block-container { max-width: 1180px; padding-top: 1.4rem; padding-bottom: 3rem; }
+#MainMenu, footer, header, [data-testid="stToolbar"], [data-testid="stDecoration"],
+[data-testid="stStatusWidget"], [data-testid="stSidebarNav"] { display:none !important; }
 
-    /* ==== خلفية متدرجة حيوية ومريحة للعين ==== */
-    .stApp {
-        background: linear-gradient(160deg, #1a1035 0%, #1e1450 35%, #142850 70%, #0f1e3d 100%);
-    }
+/* ===== Typography ===== */
+h1, h2, h3, h4, p, label, span, div { font-family: 'Cairo', sans-serif !important; }
+h1 { color:#111827 !important; font-size:32px !important; font-weight:800 !important; }
+h2 { color:#111827 !important; font-size:23px !important; font-weight:800 !important; }
+h3 { color:#111827 !important; font-size:19px !important; font-weight:700 !important; }
+.stCaption, [data-testid="stCaptionContainer"] p { color:#6b7280 !important; }
 
-    [data-testid="stAppViewContainer"] > .main {
-        background: transparent;
-    }
+/* ===== Top bar ===== */
+.topbar {
+    background:#ffffff;
+    border:1px solid #e5e7eb;
+    border-radius:16px;
+    padding:13px 18px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    box-shadow:0 2px 10px rgba(17,24,39,.04);
+    margin-bottom:22px;
+}
+.brand { display:flex; align-items:center; gap:11px; }
+.brand-icon {
+    width:42px; height:42px; border-radius:12px; background:#eff6ff;
+    display:flex; align-items:center; justify-content:center; font-size:22px;
+}
+.brand-title { font-size:18px; font-weight:800; color:#111827; }
+.brand-sub { font-size:12px; color:#6b7280; margin-top:-2px; }
 
-    h1 {
-        background: linear-gradient(90deg, #ff6b9d, #ffa36c, #7dd8ff);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        text-align: center;
-        font-weight: 800 !important;
-    }
+/* ===== Cards ===== */
+.card {
+    background:#fff; border:1px solid #e5e7eb; border-radius:18px;
+    padding:22px; box-shadow:0 3px 14px rgba(17,24,39,.045);
+    margin-bottom:18px;
+}
+.hero {
+    background:linear-gradient(135deg,#ffffff 0%,#f8fbff 100%);
+    border:1px solid #dbeafe; border-radius:20px; padding:25px 28px;
+    box-shadow:0 4px 18px rgba(37,99,235,.06); margin-bottom:20px;
+}
+.hero-kicker { color:#6b7280; font-size:14px; font-weight:600; }
+.hero-title { color:#111827; font-size:28px; font-weight:800; margin-top:2px; }
+.hero-title strong { color:#2563eb; }
+.hero-desc { color:#6b7280; font-size:14px; margin-top:3px; }
 
-    .stButton > button {
-        background: linear-gradient(90deg, #ff6b9d, #7d5fff);
-        color: #ffffff;
-        font-weight: bold;
-        border: none;
-        border-radius: 10px;
-        width: 100%;
-        padding: 0.55em 0;
-        transition: transform 0.15s ease, box-shadow 0.15s ease;
-        box-shadow: 0 4px 14px rgba(125, 95, 255, 0.35);
-    }
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(255, 107, 157, 0.4);
-    }
+.stat-card { background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:17px 18px; }
+.stat-label { color:#6b7280; font-size:12px; font-weight:600; }
+.stat-value { color:#111827; font-size:21px; font-weight:800; margin-top:2px; }
 
-    /* ==== إضافات تحسين الوضوح: أحجام خط وألوان أوضح لكل العناصر ==== */
+.section-title { font-size:18px; font-weight:800; color:#111827; margin:5px 0 13px; }
+.section-sub { color:#6b7280; font-size:13px; margin-top:-8px; margin-bottom:14px; }
 
-    /* نص عام في التطبيق */
-    .stApp, .stApp p, .stApp span, .stApp label, .stApp div {
-        color: #eef2fb;
-        font-size: 17px;
-    }
+/* ===== Inputs ===== */
+.stTextInput label, .stFileUploader label, .stRadio > label, .stCheckbox label {
+    color:#374151 !important; font-size:14px !important; font-weight:700 !important;
+}
+.stTextInput input {
+    background:#fff !important; color:#111827 !important; border:1px solid #d1d5db !important;
+    border-radius:10px !important; font-size:14px !important; min-height:44px;
+}
+.stTextInput input:focus { border-color:#2563eb !important; box-shadow:0 0 0 3px rgba(37,99,235,.10) !important; }
+.stTextInput input::placeholder { color:#9ca3af !important; }
 
-    /* العناوين الفرعية (subheader) */
-    h2, h3, .stApp h2, .stApp h3 {
-        color: #7dd8ff !important;
-        font-size: 24px !important;
-        font-weight: 700 !important;
-        margin-top: 18px;
-    }
+/* ===== Buttons ===== */
+.stButton > button, .stDownloadButton > button {
+    width:100%; min-height:44px; border-radius:10px !important; border:1px solid #2563eb !important;
+    background:#2563eb !important; color:#fff !important; font-weight:700 !important;
+    font-size:14px !important; box-shadow:0 3px 8px rgba(37,99,235,.16) !important;
+    transition:.15s ease;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+    background:#1d4ed8 !important; border-color:#1d4ed8 !important; transform:translateY(-1px);
+}
 
-    /* الديفايدر أوضح شوية */
-    hr { border-color: rgba(255,255,255,0.15) !important; }
+/* Secondary buttons */
+button[kind="secondary"] { background:#fff !important; color:#2563eb !important; }
 
-    /* ليبلز حقول الإدخال (اسم المكتب، الباسورد، إلخ) */
-    .stTextInput label, .stTextInput > label p,
-    .stRadio label, .stRadio > label p,
-    .stCheckbox label, .stCheckbox > label p,
-    .stFileUploader label, .stFileUploader > label p {
-        color: #ffffff !important;
-        font-size: 18px !important;
-        font-weight: 600 !important;
-    }
+/* ===== Tabs ===== */
+button[data-baseweb="tab"] {
+    color:#6b7280 !important; font-weight:700 !important; font-size:14px !important;
+}
+button[data-baseweb="tab"][aria-selected="true"] { color:#2563eb !important; }
+[data-baseweb="tab-highlight"] { background:#2563eb !important; height:2px !important; }
 
-    /* حقول الكتابة نفسها */
-    .stTextInput input {
-        background-color: rgba(255,255,255,0.92) !important;
-        color: #0f1923 !important;
-        font-size: 17px !important;
-        border: 1px solid rgba(125, 216, 255, 0.35) !important;
-        border-radius: 10px !important;
-    }
-    .stTextInput input:focus {
-        border: 1px solid #7dd8ff !important;
-        box-shadow: 0 0 0 3px rgba(125, 216, 255, 0.2) !important;
-    }
-    .stTextInput input::placeholder { color: #5c6b85 !important; }
+/* ===== Radio / uploader ===== */
+.stRadio div[role="radiogroup"] { gap:10px; }
+.stRadio div[role="radiogroup"] label {
+    background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:10px 14px;
+}
+[data-testid="stFileUploaderDropzone"] {
+    background:#f8fafc !important; border:1.5px dashed #cbd5e1 !important; border-radius:14px !important;
+}
+[data-testid="stFileUploaderDropzone"] button {
+    background:#fff !important; color:#2563eb !important; border:1px solid #bfdbfe !important;
+    border-radius:8px !important;
+}
 
-    /* زرار "Browse files" وكل نص أوضة رفع الملفات */
-    [data-testid="stFileUploaderDropzone"] button {
-        color: #0f1923 !important;
-        background-color: rgba(255,255,255,0.92) !important;
-        font-weight: 700 !important;
-        border-radius: 8px !important;
-    }
-    [data-testid="stFileUploaderDropzone"] button span,
-    [data-testid="stFileUploaderDropzone"] button p {
-        color: #0f1923 !important;
-    }
+/* ===== Alerts ===== */
+div[data-testid="stAlert"] { border-radius:12px !important; border:1px solid #e5e7eb !important; }
+div[data-testid="stAlert"] p { font-size:13px !important; font-weight:600 !important; }
 
-    /* أيقونة العين (إظهار/إخفاء الباسورد) بالأسود */
-    .stTextInput svg,
-    .stTextInput svg path,
-    .stTextInput svg * {
-        fill: #0f1923 !important;
-        stroke: #0f1923 !important;
-        color: #0f1923 !important;
-    }
-    .stTextInput button,
-    .stTextInput button[kind="icon"],
-    .stTextInput [data-testid="stElementToolbarButton"] {
-        color: #0f1923 !important;
-        background-color: transparent !important;
-    }
+/* ===== Search results ===== */
+.result-card { background:#fff; border:1px solid #e5e7eb; border-radius:13px; padding:14px 16px; margin:8px 0; }
+.result-name { color:#111827; font-size:15px; font-weight:800; }
+.result-status { color:#2563eb; font-size:13px; font-weight:700; margin-top:2px; }
 
-    /* خيارات الراديو (نص الاختيارات) */
-    .stRadio div[role="radiogroup"] label p { color: #eef2fb !important; font-size: 16px !important; }
+/* ===== Status badges ===== */
+.status-badge { display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+.status-ok { background:#ecfdf5; color:#15803d; }
+.status-warn { background:#fffbeb; color:#b45309; }
+.status-error { background:#fef2f2; color:#b91c1c; }
+.status-info { background:#eff6ff; color:#1d4ed8; }
 
-    /* التابات (تسجيل الدخول / حساب جديد) */
-    button[data-baseweb="tab"] {
-        font-size: 17px !important;
-        font-weight: 700 !important;
-        color: #9fb3d9 !important;
-    }
-    button[data-baseweb="tab"][aria-selected="true"] {
-        color: #ff6b9d !important;
-    }
-    [data-baseweb="tab-highlight"] {
-        background: linear-gradient(90deg, #ff6b9d, #7d5fff) !important;
-    }
+/* ===== Hide Streamlit input instructions ===== */
+[data-testid="InputInstructions"], div[data-baseweb="input"] + div small { display:none !important; }
 
-    /* رسايل النجاح/التحذير/الخطأ/المعلومات — تباين أوضح */
-    div[data-testid="stAlert"] {
-        border-radius: 12px !important;
-        border: 1px solid rgba(255,255,255,0.12) !important;
-    }
-    div[data-testid="stAlert"] p { font-size: 16px !important; font-weight: 600 !important; }
-    div[data-testid="stAlertContentSuccess"] p,
-    div[data-testid="stAlertContentInfo"] p { color: #ffffff !important; }
-
-    /* التعليقات الصغيرة (caption) */
-    .stApp small, [data-testid="stCaptionContainer"] p {
-        color: #9fb3d9 !important;
-        font-size: 14px !important;
-    }
-
-    /* الجداول (dataframe) */
-    .stDataFrame, .stDataFrame * { color: #0f1923 !important; }
-
-    /* الكود/لوج المعالجة */
-    .stApp code, pre code { font-size: 15px !important; }
-
-    /* بطاقة الترحيب */
-    .welcome-hero {
-        background: linear-gradient(120deg, rgba(255,107,157,0.18), rgba(125,95,255,0.18), rgba(125,216,255,0.15));
-        border: 1px solid rgba(255,255,255,0.12);
-        border-radius: 18px;
-        padding: 22px 26px;
-        margin-bottom: 10px;
-        text-align: center;
-    }
-    .welcome-hero .greet {
-        font-size: 15px;
-        color: #9fb3d9;
-        margin-bottom: 4px;
-    }
-    .welcome-hero .office-name {
-        font-size: 28px;
-        font-weight: 800;
-        background: linear-gradient(90deg, #ff6b9d, #7d5fff, #7dd8ff);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-    }
-    .welcome-hero .tagline {
-        font-size: 14px;
-        color: #c9d4ec;
-        margin-top: 6px;
-    }
+/* ===== Mobile ===== */
+@media (max-width: 700px) {
+    .block-container { padding: .8rem .7rem 2rem; }
+    .hero-title { font-size:23px; }
+    .topbar { padding:11px 13px; }
+}
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1>🎓 ادرس في مصر</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align:center;color:#9fb3d9'>Agent تتبع حالة الطلبات</p>",
-            unsafe_allow_html=True)
-st.divider()
-
-# ==================== لوجين ====================
+# ===== Session state =====
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
+# ===== Login =====
 if not st.session_state.logged_in and not st.session_state.is_admin:
+    st.markdown("""
+    <div style="text-align:center; margin:42px 0 24px;">
+        <div style="font-size:48px;">🎓</div>
+        <div style="font-size:31px;font-weight:800;color:#111827;">ادرس في مصر</div>
+        <div style="font-size:14px;color:#6b7280;margin-top:3px;">منصة متابعة طلبات الطلاب للمكاتب</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    tab1, tab2 = st.tabs(["🔑 تسجيل الدخول", "📝 حساب جديد"])
+    left, right = st.columns([1.15, 1], gap="large")
+    with left:
+        st.markdown("""
+        <div style="padding:40px 20px 20px 10px;">
+            <div style="font-size:14px;color:#2563eb;font-weight:800;margin-bottom:8px;">حل بسيط لإدارة المتابعة</div>
+            <div style="font-size:31px;font-weight:800;color:#111827;line-height:1.35;">تابعي طلبات طلابك<br>من مكان واحد.</div>
+            <div style="font-size:15px;color:#6b7280;line-height:1.9;margin-top:12px;max-width:480px;">
+                حدّثي حالات الطلبات، اربطي Google Sheets، وابحثي عن أي طالب بسرعة بدون متابعة يدوية.
+            </div>
+            <div style="margin-top:22px;color:#374151;font-size:14px;line-height:2.2;">
+                ✓ تحديث حالات الطلاب بشكل منظم<br>
+                ✓ حفظ مصدر البيانات للمكتب<br>
+                ✓ بحث سريع عن حالة أي طالب
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-    with tab1:
-        username = st.text_input("اسم المكتب", key="login_user")
-        password = st.text_input("كلمة المرور", type="password", key="login_pass")
-        if st.button("دخول", key="login_btn"):
-            # تحقق لو Admin
-            if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-                st.session_state.is_admin = True
-                st.rerun()
-            else:
-                ok, msg = check_login(username, password)
-                if ok:
-                    st.session_state.logged_in = True
-                    st.session_state.office = username
-                    log_to_sheet(username, "تسجيل دخول")
+    with right:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        tab1, tab2 = st.tabs(["تسجيل الدخول", "حساب جديد"])
+        with tab1:
+            st.markdown("<div style='font-size:22px;font-weight:800;color:#111827;margin:8px 0 3px;'>مرحبًا بعودتك 👋</div><div style='color:#6b7280;font-size:13px;margin-bottom:18px;'>سجلي دخولك لإدارة طلبات الطلاب</div>", unsafe_allow_html=True)
+            username = st.text_input("اسم المكتب", key="login_user", placeholder="اكتبي اسم المكتب")
+            password = st.text_input("كلمة المرور", type="password", key="login_pass", placeholder="اكتبي كلمة المرور")
+            if st.button("تسجيل الدخول", key="login_btn"):
+                if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+                    st.session_state.is_admin = True
                     st.rerun()
                 else:
-                    st.error(msg)
-
-    with tab2:
-        st.markdown("##### سجلي مكتبك عشان تبدأ تستخدم الخدمة")
-        new_office = st.text_input("اسم المكتب", key="reg_office")
-        new_email  = st.text_input("الإيميل", key="reg_email")
-        new_pass   = st.text_input("كلمة المرور", type="password", key="reg_pass")
-        new_pass2  = st.text_input("تأكيد كلمة المرور", type="password", key="reg_pass2")
-        if st.button("تسجيل", key="reg_btn"):
-            if not new_office or not new_email or not new_pass:
-                st.error("املي كل الحقول!")
-            elif new_pass != new_pass2:
-                st.error("كلمة المرور مش متطابقة!")
-            else:
-                ok, msg = register_office(new_office, new_email, new_pass)
-                if ok:
-                    st.success(msg)
+                    ok, msg = check_login(username, password)
+                    if ok:
+                        st.session_state.logged_in = True
+                        st.session_state.office = username
+                        log_to_sheet(username, "تسجيل دخول")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        with tab2:
+            st.markdown("<div style='font-size:22px;font-weight:800;color:#111827;margin:8px 0 3px;'>إنشاء حساب</div><div style='color:#6b7280;font-size:13px;margin-bottom:18px;'>سجلي مكتبك لبدء استخدام الخدمة</div>", unsafe_allow_html=True)
+            new_office = st.text_input("اسم المكتب", key="reg_office", placeholder="اسم المكتب")
+            new_email = st.text_input("الإيميل", key="reg_email", placeholder="example@email.com")
+            new_pass = st.text_input("كلمة المرور", type="password", key="reg_pass", placeholder="كلمة المرور")
+            new_pass2 = st.text_input("تأكيد كلمة المرور", type="password", key="reg_pass2", placeholder="أعيدي كتابة كلمة المرور")
+            if st.button("إنشاء الحساب", key="reg_btn"):
+                if not new_office or not new_email or not new_pass:
+                    st.error("املي كل الحقول!")
+                elif new_pass != new_pass2:
+                    st.error("كلمة المرور مش متطابقة!")
                 else:
-                    st.error(msg)
-
+                    ok, msg = register_office(new_office, new_email, new_pass)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+        st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
-# ==================== صفحة الأدمن ====================
+# ===== Top bar =====
+st.markdown("""
+<div class="topbar">
+    <div class="brand">
+        <div class="brand-icon">🎓</div>
+        <div><div class="brand-title">ادرس في مصر</div><div class="brand-sub">لوحة متابعة الطلبات</div></div>
+    </div>
+    <div style="font-size:13px;color:#6b7280;">نظام متابعة المكاتب</div>
+</div>
+""", unsafe_allow_html=True)
+
+# ===== Admin =====
 if st.session_state.is_admin:
-    st.subheader("🛡️ لوحة الإدارة")
-
+    st.markdown("<div class='hero'><div class='hero-kicker'>الإدارة</div><div class='hero-title'>لوحة الإدارة</div><div class='hero-desc'>إدارة الحسابات الجديدة ومتابعة حالة المكاتب.</div></div>", unsafe_allow_html=True)
     pending = get_pending_accounts()
+    st.markdown(f"<div class='section-title'>الحسابات المعلقة <span style='color:#2563eb'>({len(pending)})</span></div>", unsafe_allow_html=True)
     if pending:
-        st.markdown(f"**{len(pending)} حساب في انتظار الموافقة:**")
         for acc in pending:
-            col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
-            col1.write(acc.get("اسم المكتب",""))
-            col2.write(acc.get("الإيميل",""))
-            if col3.button("✅ قبول", key=f"approve_{acc.get('اسم المكتب')}"):
-                approve_account(acc.get("اسم المكتب"))
-                st.rerun()
-            if col4.button("❌ رفض", key=f"reject_{acc.get('اسم المكتب')}"):
-                reject_account(acc.get("اسم المكتب"))
-                st.rerun()
+            c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
+            c1.write(acc.get("اسم المكتب", ""))
+            c2.write(acc.get("الإيميل", ""))
+            if c3.button("قبول", key=f"approve_{acc.get('اسم المكتب')}"):
+                approve_account(acc.get("اسم المكتب")); st.rerun()
+            if c4.button("رفض", key=f"reject_{acc.get('اسم المكتب')}"):
+                reject_account(acc.get("اسم المكتب")); st.rerun()
     else:
-        st.success("مفيش حسابات في انتظار الموافقة!")
+        st.info("لا توجد حسابات في انتظار الموافقة.")
 
-    st.divider()
-
-    # كل الحسابات
-    st.markdown("**كل الحسابات:**")
+    st.markdown("<div class='section-title' style='margin-top:28px;'>كل الحسابات</div>", unsafe_allow_html=True)
     try:
         sheet = get_accounts_sheet()
         if sheet:
             all_accounts = sheet.get_all_records()
             if all_accounts:
-                import pandas as pd
-                df = pd.DataFrame(all_accounts)
-                df = df.drop(columns=["الباسورد"], errors="ignore")
-                st.dataframe(df, use_container_width=True)
-    except:
+                df = pd.DataFrame(all_accounts).drop(columns=["الباسورد"], errors="ignore")
+                st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception:
         pass
-
-    if st.button("خروج من الإدارة"):
+    if st.button("تسجيل الخروج من الإدارة"):
         st.session_state.is_admin = False
         st.rerun()
     st.stop()
 
-# ==================== الصفحة الرئيسية ====================
+# ===== Main dashboard =====
 _hour = datetime.now().hour
-if _hour < 12:
-    _greeting = "☀️ صباح الخير"
-elif _hour < 18:
-    _greeting = "🌤️ مساء الخير"
-else:
-    _greeting = "🌙 مساء الخير"
+_greeting = "صباح الخير" if _hour < 12 else "مساء الخير"
+office = st.session_state.office
 
 st.markdown(f"""
-<div class="welcome-hero">
-    <div class="greet">{_greeting}، أهلاً بيك تاني</div>
-    <div class="office-name">🏢 {st.session_state.office}</div>
-    <div class="tagline">جاهزين نتابع طلبات طلابك خطوة بخطوة ✨</div>
+<div class="hero">
+    <div class="hero-kicker">{_greeting} 👋</div>
+    <div class="hero-title">أهلاً بيك، <strong>{office}</strong></div>
+    <div class="hero-desc">تابعي طلبات طلابك وحدّثي الحالات من مكان واحد.</div>
 </div>
 """, unsafe_allow_html=True)
 
-# ==================== تتبع الحالات ====================
-st.subheader("🔍 تتبع حالات الطلاب")
+saved_link = get_gsheet_link(office)
 
-# ---- خيار المصدر ----
-saved_link = get_gsheet_link(st.session_state.office)
+# Quick stats
+s1, s2, s3 = st.columns(3)
+with s1:
+    st.markdown("<div class='stat-card'><div class='stat-label'>مصدر البيانات</div><div class='stat-value'>%s</div></div>" % ("Google Sheets" if saved_link else "غير محدد"), unsafe_allow_html=True)
+with s2:
+    st.markdown("<div class='stat-card'><div class='stat-label'>حالة الربط</div><div class='stat-value' style='color:%s'>%s</div></div>" % ("#16a34a" if saved_link else "#6b7280", "متصل" if saved_link else "لم يتم الربط"), unsafe_allow_html=True)
+with s3:
+    last_count = len(st.session_state.get("last_results", []))
+    st.markdown(f"<div class='stat-card'><div class='stat-label'>آخر نتيجة معالجة</div><div class='stat-value'>{last_count} طالب</div></div>", unsafe_allow_html=True)
 
-source_options = ["📂 رفع ملف إكسيل", "🔗 ربط Google Sheets"]
-source = st.radio("اختار مصدر البيانات:", source_options, horizontal=True)
+st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+# ===== Data source card =====
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.markdown("<div class='section-title'>مصدر بيانات الطلاب</div><div class='section-sub'>اختاري الطريقة التي يحتوي بها ملف الطلاب.</div>", unsafe_allow_html=True)
+source_options = ["📂 رفع ملف Excel", "🔗 ربط Google Sheets"]
+source = st.radio("", source_options, horizontal=True, label_visibility="collapsed")
 
 file_bytes = None
 sheet_id_source = None
 filename = ""
 
-if source == "📂 رفع ملف إكسيل":
-    uploaded = st.file_uploader("ارفع ملف الإكسيل", type=["xlsx", "xls"])
+if source == "📂 رفع ملف Excel":
+    uploaded = st.file_uploader("ارفع ملف Excel", type=["xlsx", "xls"], label_visibility="visible")
     if uploaded:
         file_bytes = uploaded.read()
         filename = uploaded.name
+        st.success(f"تم اختيار الملف: {uploaded.name}")
 
-elif source == "🔗 ربط Google Sheets":
+else:
     if saved_link:
-        st.success(f"✅ متربط بشيت: `{saved_link[:60]}...`")
-        change = st.checkbox("تغيير اللينك")
+        st.markdown(f"<div style='background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:11px 14px;color:#166534;font-size:13px;'>✓ Google Sheets متصل بالفعل لهذا المكتب</div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        change = st.checkbox("تغيير رابط الشيت")
         if change:
-            new_link = st.text_input("اللينك الجديد:")
-            if st.button("حفظ اللينك"):
+            new_link = st.text_input("رابط Google Sheets", placeholder="الصق الرابط هنا")
+            if st.button("حفظ الرابط"):
                 sid_check = extract_sheet_id(new_link) if new_link else None
                 if not new_link:
-                    st.error("ادخلي اللينك الأول!")
+                    st.error("ادخلي الرابط أولاً!")
                 elif not sid_check:
-                    st.error("اللينك مش صح!")
+                    st.error("الرابط غير صحيح!")
                 else:
-                    ok, msg = save_gsheet_link(st.session_state.office, new_link)
+                    ok, msg = save_gsheet_link(office, new_link)
                     if ok:
-                        st.success("✅ تم حفظ اللينك!")
-                        st.rerun()
+                        st.success("تم حفظ الرابط!"); st.rerun()
                     else:
-                        st.error(f"❌ {msg}")
+                        st.error(msg)
         sheet_id_source = extract_sheet_id(saved_link)
     else:
-        new_link = st.text_input("الصق لينك Google Sheets هنا:")
-        if st.button("💾 حفظ اللينك"):
-            if new_link:
-                sid = extract_sheet_id(new_link)
-                if sid:
-                    ok, msg = save_gsheet_link(st.session_state.office, new_link)
-                    if ok:
-                        st.success("✅ تم حفظ اللينك!")
-                        st.rerun()
-                    else:
-                        st.error(f"❌ {msg}")
+        new_link = st.text_input("رابط Google Sheets", placeholder="https://docs.google.com/spreadsheets/d/...")
+        if st.button("حفظ وربط الشيت"):
+            sid = extract_sheet_id(new_link) if new_link else None
+            if sid:
+                ok, msg = save_gsheet_link(office, new_link)
+                if ok:
+                    st.success("تم حفظ الرابط بنجاح!"); st.rerun()
                 else:
-                    st.error("اللينك مش صح!")
+                    st.error(msg)
             else:
-                st.error("ادخلي اللينك الأول!")
+                st.error("الرابط غير صحيح!")
 
     if sheet_id_source:
-        update_option = st.radio(
-            "عايزة إيه؟",
-            ["🔄 تحديث من الشيت الأونلاين", "📂 رفع إكسيل جديد بدلاً عنه"],
-            horizontal=True
-        )
+        update_option = st.radio("طريقة التحديث", ["🔄 تحديث من الشيت الأونلاين", "📂 رفع Excel جديد بدلاً عنه"], horizontal=True)
         if update_option == "🔄 تحديث من الشيت الأونلاين":
-            if st.button("▶ ابدأ التحديث"):
-                with st.spinner("بيقرا الشيت..."):
+            if st.button("تحميل بيانات الشيت"):
+                with st.spinner("بيقرأ الشيت..."):
                     result, err = read_gsheet_as_excel(sheet_id_source)
                     if err:
-                        st.error(f"خطأ: {err}")
-                        st.stop()
-                    file_bytes = result.read()
-                    filename = "google_sheet"
-                    # احفظيها في session_state عشان متضيعش لما الصفحة تعمل rerun
+                        st.error(f"خطأ: {err}"); st.stop()
+                    file_bytes = result.read(); filename = "google_sheet"
                     st.session_state.pending_file_bytes = file_bytes
                     st.session_state.pending_filename = filename
-                    st.success("✅ اتجابت بيانات الشيت! دوسي '▶ ابدأ' تحت عشان تبدأي المعالجة.")
+                    st.success("تم جلب بيانات الشيت. البيانات جاهزة للتحديث.")
         else:
-            uploaded2 = st.file_uploader("ارفع الإكسيل الجديد", type=["xlsx", "xls"])
+            uploaded2 = st.file_uploader("ارفع ملف Excel الجديد", type=["xlsx", "xls"])
             if uploaded2:
-                file_bytes = uploaded2.read()
-                filename = uploaded2.name
+                file_bytes = uploaded2.read(); filename = uploaded2.name
                 st.session_state.pending_file_bytes = file_bytes
                 st.session_state.pending_filename = filename
+st.markdown('</div>', unsafe_allow_html=True)
 
-# لو مفيش file_bytes في المتغير المحلي (زي بعد rerun بتاع زرار "ابدأ التحديث")، رجعيه من session_state
 if not file_bytes and st.session_state.get("pending_file_bytes"):
     file_bytes = st.session_state.pending_file_bytes
     filename = st.session_state.get("pending_filename", filename)
 
-if file_bytes and st.button("▶ ابدأ"):
-    log_to_sheet(st.session_state.office, "رفع ملف", filename)
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
-    ws = wb.active
+# ===== Processing =====
+if file_bytes:
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>تحديث حالات الطلاب</div><div class='section-sub'>اضغطي الزر لبدء فحص الطلبات وتحديث النتائج.</div>", unsafe_allow_html=True)
+    if st.button("▶ تحديث حالات الطلاب", key="start_main"):
+        log_to_sheet(office, "رفع ملف", filename)
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+        ws = wb.active
+        try:
+            cols, header_row_num = find_excel_columns(ws)
+        except Exception as e:
+            st.error(str(e)); st.stop()
 
-    try:
-        cols, header_row_num = find_excel_columns(ws)
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
+        rows_data = list(ws.iter_rows(min_row=header_row_num + 1, values_only=False))
+        valid_rows = [r for r in rows_data if r[cols["email"]].value and r[cols["password"]].value]
+        total = len(valid_rows)
+        progress = st.progress(0)
+        status_placeholder = st.empty()
+        success = failed = 0
 
-    log_area = st.empty()
-    progress = st.progress(0)
+        for idx, row in enumerate(valid_rows):
+            email = str(row[cols["email"]].value).strip()
+            password = str(row[cols["password"]].value).strip()
+            name = row[cols["name"]].value if cols["name"] is not None else ""
+            status_placeholder.markdown(f"**جاري تحديث:** {name or email}<br><span style='color:#6b7280'>طالب {idx+1} من {total}</span>", unsafe_allow_html=True)
+            session, csrf_token, err = api_login(email, password)
+            if err or not session:
+                if cols["status"] is not None: row[cols["status"]].value = "فشل تسجيل الدخول"
+                failed += 1
+            else:
+                app_num, status = get_status(session, csrf_token)
+                if cols["status"] is not None: row[cols["status"]].value = status
+                api_logout(session)
+                success += 1
+            progress.progress((idx + 1) / max(total, 1))
+            if idx < total - 1: human_delay(5, 10)
 
-    rows_data  = list(ws.iter_rows(min_row=header_row_num + 1, values_only=False))
-    valid_rows = [r for r in rows_data
-                  if r[cols["email"]].value and r[cols["password"]].value]
-    total = len(valid_rows)
+        out = io.BytesIO(); wb.save(out); out.seek(0)
+        if sheet_id_source and source == "🔗 ربط Google Sheets":
+            with st.spinner("بيحدث Google Sheets..."):
+                write_back_to_gsheet(sheet_id_source, wb)
+            st.success("تم تحديث Google Sheets تلقائيًا!")
+        up_ok, up_msg = upload_to_drive(out.getvalue(), filename, office)
+        if up_ok: st.caption("تم حفظ نسخة احتياطية على Drive")
+        log_to_sheet(office, "اكتمل المعالجة", filename)
+        st.session_state.pending_file_bytes = None
+        st.session_state.pending_filename = ""
+        st.session_state.last_results = [{"name": str(r[cols["name"]].value if cols["name"] is not None else ""), "status": str(r[cols["status"]].value if cols["status"] is not None else "")} for r in valid_rows]
+        with st.spinner("بيحفظ النتائج للبحث..."):
+            res_ok, res_msg = save_results_to_sheet(office, st.session_state.last_results)
+        st.markdown(f"<div style='background:#ecfdf5;border:1px solid #bbf7d0;border-radius:14px;padding:16px;margin-top:15px;'><div style='font-size:17px;font-weight:800;color:#166534;'>اكتمل التحديث 🎉</div><div style='color:#166534;font-size:13px;margin-top:4px;'>إجمالي {total} طالب · نجح {success} · فشل {failed}</div></div>", unsafe_allow_html=True)
+        st.download_button(label="⬇ تحميل ملف Excel المحدث", data=out, file_name="students_updated.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    log_lines = []
-    success = failed = 0
-
-    for idx, row in enumerate(valid_rows):
-        email    = str(row[cols["email"]].value).strip()
-        password = str(row[cols["password"]].value).strip()
-        name     = row[cols["name"]].value if cols["name"] is not None else ""
-
-        log_lines.append(f"👤 {name} | {email}")
-        log_area.code("\n".join(log_lines))
-
-        # لوجين
-        session, csrf_token, err = api_login(email, password)
-
-        if err or not session:
-            log_lines.append(f"   ❌ فشل اللوجين: {err}\n")
-            if cols["status"] is not None:
-                row[cols["status"]].value = "فشل تسجيل الدخول"
-            failed += 1
-        else:
-            # جيب الحالة
-            app_num, status = get_status(session, csrf_token)
-            if cols["status"] is not None:
-                row[cols["status"]].value = status
-            log_lines.append(f"   ✅ {status}")
-
-            # تسجيل خروج
-            api_logout(session)
-            log_lines.append(f"   🚪 تم تسجيل الخروج\n")
-            success += 1
-
-        log_area.code("\n".join(log_lines))
-        progress.progress((idx + 1) / total)
-
-        # delay بين كل طالب والتاني (5-10 ثواني)
-        if idx < total - 1:
-            human_delay(5, 10)
-
-    # احفظ الإكسيل
-    out = io.BytesIO()
-    wb.save(out)
-    out.seek(0)
-
-    log_lines.append("─" * 40)
-    log_lines.append(f"✅ خلصنا! إجمالي: {total} | نجح: {success} | فشل: {failed}")
-    log_area.code("\n".join(log_lines))
-
-    # لو مصدره Google Sheet، اكتب النتائج فيه أوتوماتيك
-    if sheet_id_source and source == "🔗 ربط Google Sheets":
-        with st.spinner("بيحدث الشيت الأونلاين..."):
-            write_back_to_gsheet(sheet_id_source, wb)
-        st.info("✅ تم تحديث Google Sheets أوتوماتيك!")
-
-    # ارفع الإكسيل على Drive (اختياري/احتياطي — ممكن يفشل مع service account، مش هيوقف التطبيق)
-    up_ok, up_msg = upload_to_drive(out.getvalue(), filename, st.session_state.office)
-    if up_ok:
-        st.caption("✅ اتحفظت نسخة احتياطية على Drive")
-    log_to_sheet(st.session_state.office, "اكتمل المعالجة", filename)
-
-    # امسحي الملف المؤقت من session_state عشان مايتشغلش تاني بالغلط
-    st.session_state.pending_file_bytes = None
-    st.session_state.pending_filename = ""
-
-    # احفظ النتائج للبحث
-    st.session_state.last_results = [
-        {
-            "name": str(r[cols["name"]].value if cols["name"] is not None else ""),
-            "status": str(r[cols["status"]].value if cols["status"] is not None else ""),
-        }
-        for r in valid_rows
-    ]
-
-    # احفظ النتائج في شيت "results" عشان خاصية البحث تلاقيها لاحقًا
-    with st.spinner("بيحفظ النتائج عشان البحث..."):
-        res_ok, res_msg = save_results_to_sheet(st.session_state.office, st.session_state.last_results)
-    if res_ok:
-        st.caption("✅ النتائج جاهزة للبحث")
-    else:
-        st.warning(f"⚠️ اتعملت المعالجة بنجاح بس حفظ النتائج للبحث فشل: {res_msg}")
-
-    st.success("خلصنا! حملي الإكسيل المحدث 👇")
-    st.download_button(
-        label="⬇ تحميل الإكسيل المحدث",
-        data=out,
-        file_name="students_updated.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-# ==================== بحث ====================
-st.divider()
-st.subheader("🔍 بحث باسم الطالب")
-
-search_query = st.text_input("اكتبي اسم الطالب:")
+# ===== Search =====
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.markdown("<div class='section-title'>البحث عن طالب</div><div class='section-sub'>اكتبي اسم الطالب لمعرفة آخر حالة محفوظة.</div>", unsafe_allow_html=True)
+search_query = st.text_input("اسم الطالب", placeholder="مثال: Ahmed Mohamed", label_visibility="collapsed")
 if search_query:
     with st.spinner("بيبحث..."):
-        found, err = search_results_in_sheet(st.session_state.office, search_query)
-        if err:
-            st.warning(f"⚠️ {err}")
-        elif found:
-            for r in found:
-                st.success(f"👤 **{r.get('name','')}** — {r.get('status','')}")
-        else:
-            st.warning("مفيش طالب بالاسم ده!")
+        found, err = search_results_in_sheet(office, search_query)
+    if err:
+        st.warning(err)
+    elif found:
+        for r in found:
+            status = r.get("status", "")
+            st.markdown(f"<div class='result-card'><div class='result-name'>👤 {r.get('name','')}</div><div class='result-status'>● {status}</div></div>", unsafe_allow_html=True)
+    else:
+        st.info("مفيش طالب بالاسم ده.")
+st.markdown('</div>', unsafe_allow_html=True)
 
-st.divider()
-
-if st.button("خروج"):
-    log_to_sheet(st.session_state.get("office",""), "تسجيل خروج")
+# ===== Footer / logout =====
+st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
+if st.button("تسجيل الخروج", key="logout_main"):
+    log_to_sheet(st.session_state.get("office", ""), "تسجيل خروج")
     st.session_state.clear()
     st.rerun()
