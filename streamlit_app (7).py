@@ -725,8 +725,8 @@ st.markdown("""
 
     /* حقول الكتابة نفسها */
     .stTextInput input {
-        background-color: rgba(255,255,255,0.08) !important;
-        color: #ffffff !important;
+        background-color: rgba(255,255,255,0.92) !important;
+        color: #0f1923 !important;
         font-size: 17px !important;
         border: 1px solid rgba(125, 216, 255, 0.35) !important;
         border-radius: 10px !important;
@@ -735,7 +735,19 @@ st.markdown("""
         border: 1px solid #7dd8ff !important;
         box-shadow: 0 0 0 3px rgba(125, 216, 255, 0.2) !important;
     }
-    .stTextInput input::placeholder { color: #9fb3d9 !important; }
+    .stTextInput input::placeholder { color: #5c6b85 !important; }
+
+    /* زرار "Browse files" وكل نص أوضة رفع الملفات */
+    [data-testid="stFileUploaderDropzone"] button {
+        color: #0f1923 !important;
+        background-color: rgba(255,255,255,0.92) !important;
+        font-weight: 700 !important;
+        border-radius: 8px !important;
+    }
+    [data-testid="stFileUploaderDropzone"] button span,
+    [data-testid="stFileUploaderDropzone"] button p {
+        color: #0f1923 !important;
+    }
 
     /* خيارات الراديو (نص الاختيارات) */
     .stRadio div[role="radiogroup"] label p { color: #eef2fb !important; font-size: 16px !important; }
