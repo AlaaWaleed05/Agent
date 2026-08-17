@@ -977,62 +977,6 @@ if search_query:
         else:
             st.warning("مفيش طالب بالاسم ده!")
 
-# ==================== تقرير PDF ====================
-if "last_results" in st.session_state and st.session_state.last_results:
-    st.divider()
-    st.subheader("📄 تقرير PDF")
-    if st.button("📄 توليد تقرير PDF"):
-        try:
-            from reportlab.lib.pagesizes import A4
-            from reportlab.pdfgen import canvas
-            from reportlab.pdfbase import pdfmetrics
-            from reportlab.pdfbase.ttfonts import TTFont
-            import io as _io
-
-            results = st.session_state.last_results
-            buf = _io.BytesIO()
-            c = canvas.Canvas(buf, pagesize=A4)
-            width, height = A4
-
-            c.setFont("Helvetica-Bold", 16)
-            c.drawCentredString(width/2, height-50, "Study in Egypt - Status Report")
-
-            c.setFont("Helvetica", 10)
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            c.drawCentredString(width/2, height-70, f"Office: {st.session_state.office} | Date: {now_str}")
-
-            y = height - 110
-            c.setFont("Helvetica-Bold", 11)
-            c.drawString(50, y, "Name")
-            c.drawString(300, y, "Status")
-            y -= 20
-            c.line(50, y, width-50, y)
-            y -= 15
-
-            c.setFont("Helvetica", 10)
-            for r in results:
-                if y < 60:
-                    c.showPage()
-                    y = height - 60
-                    c.setFont("Helvetica", 10)
-                name   = str(r.get("name",""))[:35]
-                status = str(r.get("status",""))[:35]
-                c.drawString(50, y, name)
-                c.drawString(300, y, status)
-                y -= 18
-
-            c.save()
-            buf.seek(0)
-
-            st.download_button(
-                label="⬇ تحميل التقرير PDF",
-                data=buf,
-                file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                mime="application/pdf"
-            )
-        except Exception as e:
-            st.error(f"خطأ في توليد PDF: {e}")
-
 st.divider()
 
 if st.button("خروج"):
