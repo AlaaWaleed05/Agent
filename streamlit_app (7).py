@@ -648,7 +648,7 @@ html, body, [class*="css"], .stApp {
 }
 .stApp { background: #f5f7fb; color: #111827; }
 [data-testid="stAppViewContainer"] > .main { background: #f5f7fb; }
-.block-container { max-width: 1180px; padding-top: 1.4rem; padding-bottom: 3rem; }
+.block-container { max-width: 1400px; padding-top: 1.4rem; padding-bottom: 3rem; }
 #MainMenu, footer, header, [data-testid="stToolbar"], [data-testid="stDecoration"],
 [data-testid="stStatusWidget"], [data-testid="stSidebarNav"] { display:none !important; }
 
@@ -695,9 +695,32 @@ h3 { color:#111827 !important; font-size:19px !important; font-weight:700 !impor
 .hero-title strong { color:#2563eb; }
 .hero-desc { color:#6b7280; font-size:14px; margin-top:3px; }
 
-.stat-card { background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:17px 18px; }
-.stat-label { color:#6b7280; font-size:12px; font-weight:600; }
-.stat-value { color:#111827; font-size:21px; font-weight:800; margin-top:2px; }
+.stat-card {
+    background:#ffffff;
+    border:1px solid #e1e5eb;
+    border-radius:30px;
+    min-height:168px;
+    padding:31px 34px;
+    display:flex;
+    flex-direction:column;
+    justify-content:center;
+    box-shadow:none;
+    box-sizing:border-box;
+}
+.stat-label {
+    color:#6b7280;
+    font-size:22px;
+    line-height:1.4;
+    font-weight:600;
+    margin-bottom:5px;
+}
+.stat-value {
+    color:#111827;
+    font-size:38px;
+    line-height:1.25;
+    font-weight:800;
+    margin-top:0;
+}
 
 .section-title { font-size:18px; font-weight:800; color:#111827; margin:5px 0 13px; }
 .section-sub { color:#6b7280; font-size:13px; margin-top:-8px; margin-bottom:14px; }
@@ -907,14 +930,39 @@ st.markdown(f"""
 saved_link = get_gsheet_link(office)
 
 # Quick stats
-s1, s2, s3 = st.columns(3)
+# ترتيب الأعمدة مع RTL: مصدر البيانات يمين — حالة الربط وسط — آخر نتيجة يسار
+s1, s2, s3 = st.columns(3, gap="large")
+
 with s1:
-    st.markdown("<div class='stat-card'><div class='stat-label'>مصدر البيانات</div><div class='stat-value'>%s</div></div>" % ("Google Sheets" if saved_link else "غير محدد"), unsafe_allow_html=True)
+    st.markdown(
+        "<div class='stat-card'>"
+        "<div class='stat-label'>مصدر البيانات</div>"
+        "<div class='stat-value'>%s</div>"
+        "</div>" % ("Google Sheets" if saved_link else "غير محدد"),
+        unsafe_allow_html=True
+    )
+
 with s2:
-    st.markdown("<div class='stat-card'><div class='stat-label'>حالة الربط</div><div class='stat-value' style='color:%s'>%s</div></div>" % ("#16a34a" if saved_link else "#6b7280", "متصل" if saved_link else "لم يتم الربط"), unsafe_allow_html=True)
+    st.markdown(
+        "<div class='stat-card'>"
+        "<div class='stat-label'>حالة الربط</div>"
+        "<div class='stat-value' style='color:%s'>%s</div>"
+        "</div>" % (
+            "#16a34a" if saved_link else "#6b7280",
+            "متصل" if saved_link else "لم يتم الربط"
+        ),
+        unsafe_allow_html=True
+    )
+
 with s3:
     last_count = len(st.session_state.get("last_results", []))
-    st.markdown(f"<div class='stat-card'><div class='stat-label'>آخر نتيجة معالجة</div><div class='stat-value'>{last_count} طالب</div></div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='stat-card'>"
+        f"<div class='stat-label'>آخر نتيجة معالجة</div>"
+        f"<div class='stat-value'>{last_count} طالب</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
 
 st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
 
