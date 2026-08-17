@@ -238,7 +238,7 @@ def save_gsheet_link(office, link):
     try:
         sheet = get_accounts_sheet()
         if not sheet:
-            return False, "مش قادر أوصل لشيت الحسابات (accounts sheet) — تأكدي من صلاحيات الـ service account."
+            return False, "مش قادر أوصل لشيت الحسابات (accounts sheet) — تأكد من صلاحيات الـ service account."
 
         headers = sheet.row_values(1)
         target = str(office).strip()
@@ -420,7 +420,7 @@ def search_results_in_sheet(office, name_query):
 
         all_values = sheet.get_all_values()
         if len(all_values) <= 1:
-            return [], "مفيش نتائج محفوظة لأي مكتب لسه — لازم تعملي '▶ ابدأ' مرة واحدة الأول."
+            return [], "مفيش نتائج محفوظة لأي مكتب لسه — لازم تعمل '▶ ابدأ' مرة واحدة الأول."
 
         target_office = str(office).strip()
         query = str(name_query).strip()
@@ -830,9 +830,9 @@ if not st.session_state.logged_in and not st.session_state.is_admin:
         st.markdown("""
         <div style="padding:40px 20px 20px 10px;">
             <div style="font-size:14px;color:#2563eb;font-weight:800;margin-bottom:8px;">حل بسيط لإدارة المتابعة</div>
-            <div style="font-size:31px;font-weight:800;color:#111827;line-height:1.35;">تابعي طلبات طلابك<br>من مكان واحد.</div>
+            <div style="font-size:31px;font-weight:800;color:#111827;line-height:1.35;">تابع طلبات طلابك<br>من مكان واحد.</div>
             <div style="font-size:15px;color:#6b7280;line-height:1.9;margin-top:12px;max-width:480px;">
-                حدّثي حالات الطلبات، اربطي Google Sheets، وابحثي عن أي طالب بسرعة بدون متابعة يدوية.
+                حدّث حالات الطلبات، اربط Google Sheets، وابحث عن أي طالب بسرعة بدون متابعة يدوية.
             </div>
             <div style="margin-top:22px;color:#374151;font-size:14px;line-height:2.2;">
                 ✓ تحديث حالات الطلاب بشكل منظم<br>
@@ -847,8 +847,8 @@ if not st.session_state.logged_in and not st.session_state.is_admin:
         tab1, tab2 = st.tabs(["تسجيل الدخول", "حساب جديد"])
         with tab1:
             st.markdown("<div style='font-size:22px;font-weight:800;color:#111827;margin:8px 0 3px;'>مرحبًا بعودتك 👋</div><div style='color:#6b7280;font-size:13px;margin-bottom:18px;'>سجلي دخولك لإدارة طلبات الطلاب</div>", unsafe_allow_html=True)
-            username = st.text_input("اسم المكتب", key="login_user", placeholder="اكتبي اسم المكتب")
-            password = st.text_input("كلمة المرور", type="password", key="login_pass", placeholder="اكتبي كلمة المرور")
+            username = st.text_input("اسم المكتب", key="login_user", placeholder="اكتب اسم المكتب")
+            password = st.text_input("كلمة المرور", type="password", key="login_pass", placeholder="اكتب كلمة المرور")
             if st.button("تسجيل الدخول", key="login_btn"):
                 if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
                     st.session_state.is_admin = True
@@ -867,10 +867,10 @@ if not st.session_state.logged_in and not st.session_state.is_admin:
             new_office = st.text_input("اسم المكتب", key="reg_office", placeholder="اسم المكتب")
             new_email = st.text_input("الإيميل", key="reg_email", placeholder="example@email.com")
             new_pass = st.text_input("كلمة المرور", type="password", key="reg_pass", placeholder="كلمة المرور")
-            new_pass2 = st.text_input("تأكيد كلمة المرور", type="password", key="reg_pass2", placeholder="أعيدي كتابة كلمة المرور")
+            new_pass2 = st.text_input("تأكيد كلمة المرور", type="password", key="reg_pass2", placeholder="أعد كتابة كلمة المرور")
             if st.button("إنشاء الحساب", key="reg_btn"):
                 if not new_office or not new_email or not new_pass:
-                    st.error("املي كل الحقول!")
+                    st.error("املأ كل الحقول!")
                 elif new_pass != new_pass2:
                     st.error("كلمة المرور مش متطابقة!")
                 else:
@@ -933,8 +933,8 @@ office = st.session_state.office
 st.markdown(f"""
 <div class="hero">
     <div class="hero-kicker">{_greeting} 👋</div>
-    <div class="hero-title">أهلاً بيك، <strong>{office}</strong></div>
-    <div class="hero-desc">تابعي طلبات طلابك وحدّثي الحالات من مكان واحد.</div>
+    <div class="hero-title">أهلاً بك، <strong>{office}</strong></div>
+    <div class="hero-desc">تابع طلبات طلابك وحدّث الحالات من مكان واحد.</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -944,7 +944,7 @@ st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
 
 # ===== Data source card =====
 st.markdown("<div class='card'>", unsafe_allow_html=True)
-st.markdown("<div class='section-title'>مصدر بيانات الطلاب</div><div class='section-sub'>اختاري الطريقة التي يحتوي بها ملف الطلاب.</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-title'>مصدر بيانات الطلاب</div><div class='section-sub'>اختر الطريقة التي بها ملف الطلاب.</div>", unsafe_allow_html=True)
 source_options = ["📂 رفع ملف Excel", "🔗 ربط Google Sheets"]
 source = st.radio("", source_options, horizontal=True, label_visibility="collapsed")
 
