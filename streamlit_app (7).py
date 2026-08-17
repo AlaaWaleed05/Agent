@@ -161,17 +161,37 @@ def get_latest_file_from_drive(office):
         )
         service = build("drive", "v3", credentials=creds)
 
-        # ابحث عن آخر ملف للمكتب ده في الفولدر
+        # اسم المكتب ممكن يكون فيه علامات تكسر الكويري (زي ' أو \) — نعمل escape ليها
+        safe_office = str(office).replace("\\", "\\\\").replace("'", "\\'")
+
+        # ابحث عن آخر ملف للمكتب ده في الفولدر (مع دعم Shared Drives لو الفولدر جواها)
         results = service.files().list(
-            q=f"'{DRIVE_FOLDER_ID}' in parents and name contains '{office}' and trashed=false",
+            q=f"'{DRIVE_FOLDER_ID}' in parents and name contains '{safe_office}' and trashed=false",
             orderBy="createdTime desc",
             pageSize=1,
-            fields="files(id, name, createdTime)"
+            fields="files(id, name, createdTime)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
         ).execute()
 
         files = results.get("files", [])
         if not files:
-            return None, "مفيش ملفات محفوظة للمكتب ده!"
+            # نتأكد الفولدر أصلاً متاح ومقدر نشوف اللي فيه، عشان نميز
+            # بين "مفيش ملفات بالاسم ده" و"مش قادرين نوصل للفولدر خالص"
+            try:
+                probe = service.files().list(
+                    q=f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
+                    pageSize=5,
+                    fields="files(id, name)",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                ).execute()
+                existing = [f["name"] for f in probe.get("files", [])]
+                if not existing:
+                    return None, "الفولدر على Drive فاضي أو الـ service account مالوش صلاحية يشوف محتوياته — تأكدي إن الفولدر متشيير مع إيميل الـ service account."
+                return None, f"مفيش ملفات باسم فيه '{office}'. أسماء ملفات موجودة فعلاً في الفولدر: {existing}"
+            except Exception as probe_err:
+                return None, f"مفيش ملفات محفوظة للمكتب ده، وكمان فشل فحص الفولدر: {probe_err}"
 
         # حمل الملف
         from googleapiclient.http import MediaIoBaseDownload
@@ -368,7 +388,8 @@ def upload_to_drive(file_bytes, filename, office):
         service.files().create(
             body=file_metadata,
             media_body=media,
-            fields="id"
+            fields="id",
+            supportsAllDrives=True,
         ).execute()
 
         return True, "تم الرفع بنجاح"
