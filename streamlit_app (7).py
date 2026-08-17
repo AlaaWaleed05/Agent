@@ -750,12 +750,18 @@ st.markdown("""
     }
 
     /* أيقونة العين (إظهار/إخفاء الباسورد) بالأسود */
-    .stTextInput svg {
+    .stTextInput svg,
+    .stTextInput svg path,
+    .stTextInput svg * {
         fill: #0f1923 !important;
+        stroke: #0f1923 !important;
         color: #0f1923 !important;
     }
-    .stTextInput button {
+    .stTextInput button,
+    .stTextInput button[kind="icon"],
+    .stTextInput [data-testid="stElementToolbarButton"] {
         color: #0f1923 !important;
+        background-color: transparent !important;
     }
 
     /* خيارات الراديو (نص الاختيارات) */
