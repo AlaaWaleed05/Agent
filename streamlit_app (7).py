@@ -338,7 +338,7 @@ def write_back_to_gsheet(sheet_id, wb):
 
 
 def upload_to_drive(file_bytes, filename, office):
-    """بيرفع الإكسيل على Google Drive"""
+    """بيرفع الإكسيل على Google Drive — بترجع (ok, message) عشان تبان أي مشكلة فعلية"""
     try:
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaIoBaseUpload
@@ -371,10 +371,10 @@ def upload_to_drive(file_bytes, filename, office):
             fields="id"
         ).execute()
 
-        return True
+        return True, "تم الرفع بنجاح"
     except Exception as e:
         print(f"خطأ في رفع الملف: {e}")
-        return False
+        return False, f"فشل الرفع على Drive: {e}"
 
 # ==================== API ====================
 BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"
@@ -820,7 +820,11 @@ if file_bytes and st.button("▶ ابدأ"):
         st.info("✅ تم تحديث Google Sheets أوتوماتيك!")
 
     # ارفع الإكسيل على Drive
-    upload_to_drive(out.getvalue(), filename, st.session_state.office)
+    up_ok, up_msg = upload_to_drive(out.getvalue(), filename, st.session_state.office)
+    if up_ok:
+        st.info("✅ اتحفظت نسخة على Drive — هتلاقيها بعدين في البحث.")
+    else:
+        st.error(f"⚠️ {up_msg} — البحث لاحقًا مش هيلاقي الملف ده لحد ما ترفعي تاني أو تحلي مشكلة الرفع.")
     log_to_sheet(st.session_state.office, "اكتمل المعالجة", filename)
 
     # امسحي الملف المؤقت من session_state عشان مايتشغلش تاني بالغلط
