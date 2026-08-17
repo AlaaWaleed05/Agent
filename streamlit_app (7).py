@@ -363,6 +363,86 @@ def write_back_to_gsheet(sheet_id, wb):
         return False
 
 
+def get_results_sheet():
+    """جيب أو أنشئ ورقة النتائج الموحدة (بديل رفع الملفات على Drive اللي مش شغال مع service account)"""
+    try:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://spreadsheets.google.com/feeds",
+                    "https://www.googleapis.com/auth/drive"]
+        )
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(SHEET_ID)
+        try:
+            sheet = spreadsheet.worksheet("results")
+        except:
+            sheet = spreadsheet.add_worksheet("results", 2000, 4)
+            sheet.append_row(["اسم المكتب", "اسم الطالب", "الحالة", "تاريخ التحديث"])
+        return sheet
+    except Exception as e:
+        print(f"خطأ في ورقة النتائج: {e}")
+        return None
+
+
+def save_results_to_sheet(office, results):
+    """بيحفظ آخر نتائج المكتب في ورقة 'results' — بيمسح القديم بتاع المكتب ده ويكتب الجديد"""
+    try:
+        sheet = get_results_sheet()
+        if not sheet:
+            return False, "مش قادر أوصل لورقة النتائج"
+
+        all_values = sheet.get_all_values()
+        headers = all_values[0] if all_values else ["اسم المكتب", "اسم الطالب", "الحالة", "تاريخ التحديث"]
+
+        target = str(office).strip()
+        # سيبي باقي المكاتب زي ما هي، وامسحي بس صفوف المكتب ده القديمة
+        kept_rows = [row for row in all_values[1:] if row and str(row[0]).strip() != target]
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_rows = [[target, r.get("name", ""), r.get("status", ""), now] for r in results]
+
+        final_data = [headers] + kept_rows + new_rows
+        sheet.clear()
+        sheet.update(final_data)
+        return True, "تم حفظ النتائج"
+    except Exception as e:
+        print(f"خطأ في حفظ النتائج: {e}")
+        return False, f"خطأ: {e}"
+
+
+def search_results_in_sheet(office, name_query):
+    """بيبحث عن طالب باسمه جوه آخر نتائج محفوظة للمكتب ده"""
+    try:
+        sheet = get_results_sheet()
+        if not sheet:
+            return [], "مش قادر أوصل لورقة النتائج"
+
+        all_values = sheet.get_all_values()
+        if len(all_values) <= 1:
+            return [], "مفيش نتائج محفوظة لأي مكتب لسه — لازم تعملي '▶ ابدأ' مرة واحدة الأول."
+
+        target_office = str(office).strip()
+        query = str(name_query).strip()
+        found = []
+        office_has_any = False
+        for row in all_values[1:]:
+            if len(row) < 3:
+                continue
+            row_office, row_name, row_status = row[0], row[1], row[2]
+            if str(row_office).strip() != target_office:
+                continue
+            office_has_any = True
+            if query in str(row_name):
+                found.append({"name": row_name, "status": row_status})
+
+        if not office_has_any:
+            return [], "مفيش نتائج محفوظة للمكتب ده لسه — لازم تعملي '▶ ابدأ' مرة واحدة الأول."
+        return found, None
+    except Exception as e:
+        return [], f"خطأ: {e}"
+
+
 def upload_to_drive(file_bytes, filename, office):
     """بيرفع الإكسيل على Google Drive — بترجع (ok, message) عشان تبان أي مشكلة فعلية"""
     try:
@@ -846,12 +926,10 @@ if file_bytes and st.button("▶ ابدأ"):
             write_back_to_gsheet(sheet_id_source, wb)
         st.info("✅ تم تحديث Google Sheets أوتوماتيك!")
 
-    # ارفع الإكسيل على Drive
+    # ارفع الإكسيل على Drive (اختياري/احتياطي — ممكن يفشل مع service account، مش هيوقف التطبيق)
     up_ok, up_msg = upload_to_drive(out.getvalue(), filename, st.session_state.office)
     if up_ok:
-        st.info("✅ اتحفظت نسخة على Drive — هتلاقيها بعدين في البحث.")
-    else:
-        st.error(f"⚠️ {up_msg} — البحث لاحقًا مش هيلاقي الملف ده لحد ما ترفعي تاني أو تحلي مشكلة الرفع.")
+        st.caption("✅ اتحفظت نسخة احتياطية على Drive")
     log_to_sheet(st.session_state.office, "اكتمل المعالجة", filename)
 
     # امسحي الملف المؤقت من session_state عشان مايتشغلش تاني بالغلط
@@ -866,6 +944,14 @@ if file_bytes and st.button("▶ ابدأ"):
         }
         for r in valid_rows
     ]
+
+    # احفظ النتائج في شيت "results" عشان خاصية البحث تلاقيها لاحقًا
+    with st.spinner("بيحفظ النتائج عشان البحث..."):
+        res_ok, res_msg = save_results_to_sheet(st.session_state.office, st.session_state.last_results)
+    if res_ok:
+        st.caption("✅ النتائج جاهزة للبحث")
+    else:
+        st.warning(f"⚠️ اتعملت المعالجة بنجاح بس حفظ النتائج للبحث فشل: {res_msg}")
 
     st.success("خلصنا! حملي الإكسيل المحدث 👇")
     st.download_button(
@@ -882,18 +968,14 @@ st.subheader("🔍 بحث باسم الطالب")
 search_query = st.text_input("اكتبي اسم الطالب:")
 if search_query:
     with st.spinner("بيبحث..."):
-        # جيب آخر ملف محدث من Drive
-        file_buf, err = get_latest_file_from_drive(st.session_state.office)
+        found, err = search_results_in_sheet(st.session_state.office, search_query)
         if err:
-            st.warning(f"⚠️ {err} - لازم ترفعي إكسيل الأول.")
+            st.warning(f"⚠️ {err}")
+        elif found:
+            for r in found:
+                st.success(f"👤 **{r.get('name','')}** — {r.get('status','')}")
         else:
-            file_bytes_search = file_buf.read()
-            found = search_in_excel(file_bytes_search, search_query)
-            if found:
-                for r in found:
-                    st.success(f"👤 **{r.get('name','')}** — {r.get('status','')}")
-            else:
-                st.warning("مفيش طالب بالاسم ده!")
+            st.warning("مفيش طالب بالاسم ده!")
 
 # ==================== تقرير PDF ====================
 if "last_results" in st.session_state and st.session_state.last_results:
