@@ -214,27 +214,40 @@ def search_in_excel(file_bytes, name_query):
 
 
 def save_gsheet_link(office, link):
-    """بيحفظ لينك Google Sheets بتاع المكتب"""
+    """بيحفظ لينك Google Sheets بتاع المكتب — بترجع (ok, message) عشان تبان المشكلة الحقيقية"""
     try:
         sheet = get_accounts_sheet()
         if not sheet:
-            return False
+            return False, "مش قادر أوصل لشيت الحسابات (accounts sheet) — تأكدي من صلاحيات الـ service account."
+
         records = sheet.get_all_records()
+        headers = sheet.row_values(1)
+
+        target = str(office).strip()
+        row_num = None
         for i, r in enumerate(records, start=2):
-            if str(r.get("اسم المكتب", "")).strip() == str(office).strip():
-                # لو مفيش عمود للينك، أضيفه
-                headers = sheet.row_values(1)
-                if "لينك الشيت" not in headers:
-                    sheet.update_cell(1, len(headers)+1, "لينك الشيت")
-                    col_num = len(headers)+1
-                else:
-                    col_num = headers.index("لينك الشيت") + 1
-                sheet.update_cell(i, col_num, link)
-                return True
-        return False
+            existing = str(r.get("اسم المكتب", "")).strip()
+            if existing == target:
+                row_num = i
+                break
+
+        if row_num is None:
+            all_names = [str(r.get("اسم المكتب", "")).strip() for r in records]
+            return False, f"مش لاقي مكتب اسمه '{target}' في شيت الحسابات. الأسماء الموجودة فعلاً: {all_names}"
+
+        # لو مفيش عمود للينك، ضيفيه
+        if "لينك الشيت" not in headers:
+            col_num = len(headers) + 1
+            sheet.update_cell(1, col_num, "لينك الشيت")
+        else:
+            col_num = headers.index("لينك الشيت") + 1
+
+        sheet.update_cell(row_num, col_num, link)
+        return True, "تم الحفظ بنجاح"
+
     except Exception as e:
         print(f"خطأ في حفظ اللينك: {e}")
-        return False
+        return False, f"خطأ: {e}"
 
 
 def get_gsheet_link(office):
@@ -676,12 +689,12 @@ elif source == "🔗 ربط Google Sheets":
                 elif not sid_check:
                     st.error("اللينك مش صح!")
                 else:
-                    ok = save_gsheet_link(st.session_state.office, new_link)
+                    ok, msg = save_gsheet_link(st.session_state.office, new_link)
                     if ok:
                         st.success("✅ تم حفظ اللينك!")
                         st.rerun()
                     else:
-                        st.error("❌ حصل خطأ وما اتحفظش اللينك — جربي تاني، أو أكدي إن اسم المكتب متطابق في حسابك.")
+                        st.error(f"❌ {msg}")
         sheet_id_source = extract_sheet_id(saved_link)
     else:
         new_link = st.text_input("الصق لينك Google Sheets هنا:")
@@ -689,12 +702,12 @@ elif source == "🔗 ربط Google Sheets":
             if new_link:
                 sid = extract_sheet_id(new_link)
                 if sid:
-                    ok = save_gsheet_link(st.session_state.office, new_link)
+                    ok, msg = save_gsheet_link(st.session_state.office, new_link)
                     if ok:
                         st.success("✅ تم حفظ اللينك!")
                         st.rerun()
                     else:
-                        st.error("❌ حصل خطأ وما اتحفظش اللينك — جربي تاني، أو أكدي إن اسم المكتب متطابق في حسابك.")
+                        st.error(f"❌ {msg}")
                 else:
                     st.error("اللينك مش صح!")
             else:
