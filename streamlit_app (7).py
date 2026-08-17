@@ -949,7 +949,7 @@ st.subheader("🔍 تتبع حالات الطلاب")
 saved_link = get_gsheet_link(st.session_state.office)
 
 source_options = ["📂 رفع ملف إكسيل", "🔗 ربط Google Sheets"]
-source = st.radio("اختاري مصدر البيانات:", source_options, horizontal=True)
+source = st.radio("اختار مصدر البيانات:", source_options, horizontal=True)
 
 file_bytes = None
 sheet_id_source = None
