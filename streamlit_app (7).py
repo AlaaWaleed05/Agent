@@ -749,6 +749,15 @@ st.markdown("""
         color: #0f1923 !important;
     }
 
+    /* أيقونة العين (إظهار/إخفاء الباسورد) بالأسود */
+    .stTextInput svg {
+        fill: #0f1923 !important;
+        color: #0f1923 !important;
+    }
+    .stTextInput button {
+        color: #0f1923 !important;
+    }
+
     /* خيارات الراديو (نص الاختيارات) */
     .stRadio div[role="radiogroup"] label p { color: #eef2fb !important; font-size: 16px !important; }
 
