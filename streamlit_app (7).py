@@ -666,6 +666,75 @@ st.markdown("""
         width: 100%;
     }
     .stButton > button:hover { background-color: #00a8d6; }
+
+    /* ==== إضافات تحسين الوضوح: أحجام خط وألوان أوضح لكل العناصر ==== */
+
+    /* نص عام في التطبيق */
+    .stApp, .stApp p, .stApp span, .stApp label, .stApp div {
+        color: #e6f1fa;
+        font-size: 17px;
+    }
+
+    /* العناوين الفرعية (subheader) */
+    h2, h3, .stApp h2, .stApp h3 {
+        color: #00c6ff !important;
+        font-size: 24px !important;
+        font-weight: 700 !important;
+        margin-top: 18px;
+    }
+
+    /* الديفايدر أوضح شوية */
+    hr { border-color: #234258 !important; }
+
+    /* ليبلز حقول الإدخال (اسم المكتب، الباسورد، إلخ) */
+    .stTextInput label, .stTextInput > label p,
+    .stRadio label, .stRadio > label p,
+    .stCheckbox label, .stCheckbox > label p,
+    .stFileUploader label, .stFileUploader > label p {
+        color: #ffffff !important;
+        font-size: 18px !important;
+        font-weight: 600 !important;
+    }
+
+    /* حقول الكتابة نفسها */
+    .stTextInput input {
+        background-color: #16283a !important;
+        color: #ffffff !important;
+        font-size: 17px !important;
+        border: 1px solid #234258 !important;
+        border-radius: 8px !important;
+    }
+    .stTextInput input::placeholder { color: #7a9cc0 !important; }
+
+    /* خيارات الراديو (نص الاختيارات) */
+    .stRadio div[role="radiogroup"] label p { color: #e6f1fa !important; font-size: 16px !important; }
+
+    /* التابات (تسجيل الدخول / حساب جديد) */
+    button[data-baseweb="tab"] {
+        font-size: 17px !important;
+        font-weight: 700 !important;
+        color: #7a9cc0 !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: #00c6ff !important;
+    }
+
+    /* رسايل النجاح/التحذير/الخطأ/المعلومات — تباين أوضح */
+    div[data-testid="stAlert"] p { font-size: 16px !important; font-weight: 600 !important; }
+    div[data-testid="stAlertContentSuccess"] p,
+    div[data-testid="stAlertContentInfo"] p { color: #ffffff !important; }
+
+    /* التعليقات الصغيرة (caption) */
+    .stApp small, [data-testid="stCaptionContainer"] p {
+        color: #9fc2e0 !important;
+        font-size: 14px !important;
+    }
+
+    /* الجداول (dataframe) */
+    .stDataFrame, .stDataFrame * { color: #0f1923 !important; }
+
+    /* الكود/لوج المعالجة */
+    .stApp code, pre code { font-size: 15px !important; }
 </style>
 """, unsafe_allow_html=True)
 
