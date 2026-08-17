@@ -655,36 +655,63 @@ st.markdown("""
     .styles_viewerBadge__1yB5_, .viewerBadge_link__1S137,
     .viewerBadge_text__1JaDK, div[class*="viewerBadge"],
     div[class*="StatusWidget"], [data-testid="stBottom"] > div:last-child {display: none !important;}
-    .stApp { background-color: #0f1923; }
-    h1 { color: #00c6ff !important; text-align: center; }
+
+    /* إخفاء رسالة "Press Enter to apply" اللي بتظهر تحت حقول الإدخال */
+    [data-testid="InputInstructions"] {display: none !important;}
+    div[data-baseweb="input"] + div small {display: none !important;}
+
+    /* ==== خلفية متدرجة حيوية ومريحة للعين ==== */
+    .stApp {
+        background: linear-gradient(160deg, #1a1035 0%, #1e1450 35%, #142850 70%, #0f1e3d 100%);
+    }
+
+    [data-testid="stAppViewContainer"] > .main {
+        background: transparent;
+    }
+
+    h1 {
+        background: linear-gradient(90deg, #ff6b9d, #ffa36c, #7dd8ff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        text-align: center;
+        font-weight: 800 !important;
+    }
+
     .stButton > button {
-        background-color: #00c6ff;
-        color: #0f1923;
+        background: linear-gradient(90deg, #ff6b9d, #7d5fff);
+        color: #ffffff;
         font-weight: bold;
         border: none;
-        border-radius: 8px;
+        border-radius: 10px;
         width: 100%;
+        padding: 0.55em 0;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+        box-shadow: 0 4px 14px rgba(125, 95, 255, 0.35);
     }
-    .stButton > button:hover { background-color: #00a8d6; }
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(255, 107, 157, 0.4);
+    }
 
     /* ==== إضافات تحسين الوضوح: أحجام خط وألوان أوضح لكل العناصر ==== */
 
     /* نص عام في التطبيق */
     .stApp, .stApp p, .stApp span, .stApp label, .stApp div {
-        color: #e6f1fa;
+        color: #eef2fb;
         font-size: 17px;
     }
 
     /* العناوين الفرعية (subheader) */
     h2, h3, .stApp h2, .stApp h3 {
-        color: #00c6ff !important;
+        color: #7dd8ff !important;
         font-size: 24px !important;
         font-weight: 700 !important;
         margin-top: 18px;
     }
 
     /* الديفايدر أوضح شوية */
-    hr { border-color: #234258 !important; }
+    hr { border-color: rgba(255,255,255,0.15) !important; }
 
     /* ليبلز حقول الإدخال (اسم المكتب، الباسورد، إلخ) */
     .stTextInput label, .stTextInput > label p,
@@ -698,35 +725,46 @@ st.markdown("""
 
     /* حقول الكتابة نفسها */
     .stTextInput input {
-        background-color: #16283a !important;
+        background-color: rgba(255,255,255,0.08) !important;
         color: #ffffff !important;
         font-size: 17px !important;
-        border: 1px solid #234258 !important;
-        border-radius: 8px !important;
+        border: 1px solid rgba(125, 216, 255, 0.35) !important;
+        border-radius: 10px !important;
     }
-    .stTextInput input::placeholder { color: #7a9cc0 !important; }
+    .stTextInput input:focus {
+        border: 1px solid #7dd8ff !important;
+        box-shadow: 0 0 0 3px rgba(125, 216, 255, 0.2) !important;
+    }
+    .stTextInput input::placeholder { color: #9fb3d9 !important; }
 
     /* خيارات الراديو (نص الاختيارات) */
-    .stRadio div[role="radiogroup"] label p { color: #e6f1fa !important; font-size: 16px !important; }
+    .stRadio div[role="radiogroup"] label p { color: #eef2fb !important; font-size: 16px !important; }
 
     /* التابات (تسجيل الدخول / حساب جديد) */
     button[data-baseweb="tab"] {
         font-size: 17px !important;
         font-weight: 700 !important;
-        color: #7a9cc0 !important;
+        color: #9fb3d9 !important;
     }
     button[data-baseweb="tab"][aria-selected="true"] {
-        color: #00c6ff !important;
+        color: #ff6b9d !important;
+    }
+    [data-baseweb="tab-highlight"] {
+        background: linear-gradient(90deg, #ff6b9d, #7d5fff) !important;
     }
 
     /* رسايل النجاح/التحذير/الخطأ/المعلومات — تباين أوضح */
+    div[data-testid="stAlert"] {
+        border-radius: 12px !important;
+        border: 1px solid rgba(255,255,255,0.12) !important;
+    }
     div[data-testid="stAlert"] p { font-size: 16px !important; font-weight: 600 !important; }
     div[data-testid="stAlertContentSuccess"] p,
     div[data-testid="stAlertContentInfo"] p { color: #ffffff !important; }
 
     /* التعليقات الصغيرة (caption) */
     .stApp small, [data-testid="stCaptionContainer"] p {
-        color: #9fc2e0 !important;
+        color: #9fb3d9 !important;
         font-size: 14px !important;
     }
 
@@ -735,11 +773,39 @@ st.markdown("""
 
     /* الكود/لوج المعالجة */
     .stApp code, pre code { font-size: 15px !important; }
+
+    /* بطاقة الترحيب */
+    .welcome-hero {
+        background: linear-gradient(120deg, rgba(255,107,157,0.18), rgba(125,95,255,0.18), rgba(125,216,255,0.15));
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 18px;
+        padding: 22px 26px;
+        margin-bottom: 10px;
+        text-align: center;
+    }
+    .welcome-hero .greet {
+        font-size: 15px;
+        color: #9fb3d9;
+        margin-bottom: 4px;
+    }
+    .welcome-hero .office-name {
+        font-size: 28px;
+        font-weight: 800;
+        background: linear-gradient(90deg, #ff6b9d, #7d5fff, #7dd8ff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+    .welcome-hero .tagline {
+        font-size: 14px;
+        color: #c9d4ec;
+        margin-top: 6px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("<h1>🎓 ادرس في مصر</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align:center;color:#7a9cc0'>Agent تتبع حالة الطلبات</p>",
+st.markdown("<p style='text-align:center;color:#9fb3d9'>Agent تتبع حالة الطلبات</p>",
             unsafe_allow_html=True)
 st.divider()
 
@@ -833,7 +899,21 @@ if st.session_state.is_admin:
     st.stop()
 
 # ==================== الصفحة الرئيسية ====================
-st.markdown(f"مرحباً بمكتب: **{st.session_state.office}**")
+_hour = datetime.now().hour
+if _hour < 12:
+    _greeting = "☀️ صباح الخير"
+elif _hour < 18:
+    _greeting = "🌤️ مساء الخير"
+else:
+    _greeting = "🌙 مساء الخير"
+
+st.markdown(f"""
+<div class="welcome-hero">
+    <div class="greet">{_greeting}، أهلاً بيك تاني</div>
+    <div class="office-name">🏢 {st.session_state.office}</div>
+    <div class="tagline">جاهزين نتابع طلبات طلابك خطوة بخطوة ✨</div>
+</div>
+""", unsafe_allow_html=True)
 
 # ==================== تتبع الحالات ====================
 st.subheader("🔍 تتبع حالات الطلاب")
