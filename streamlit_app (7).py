@@ -221,7 +221,7 @@ def save_gsheet_link(office, link):
             return False
         records = sheet.get_all_records()
         for i, r in enumerate(records, start=2):
-            if r.get("اسم المكتب") == office:
+            if str(r.get("اسم المكتب", "")).strip() == str(office).strip():
                 # لو مفيش عمود للينك، أضيفه
                 headers = sheet.row_values(1)
                 if "لينك الشيت" not in headers:
@@ -233,6 +233,7 @@ def save_gsheet_link(office, link):
                 return True
         return False
     except Exception as e:
+        print(f"خطأ في حفظ اللينك: {e}")
         return False
 
 
@@ -248,7 +249,7 @@ def get_gsheet_link(office):
         col_num = headers.index("لينك الشيت") + 1
         records = sheet.get_all_records()
         for r in records:
-            if r.get("اسم المكتب") == office:
+            if str(r.get("اسم المكتب", "")).strip() == str(office).strip():
                 link = r.get("لينك الشيت", "")
                 return link if link else None
         return None
@@ -669,9 +670,18 @@ elif source == "🔗 ربط Google Sheets":
         if change:
             new_link = st.text_input("اللينك الجديد:")
             if st.button("حفظ اللينك"):
-                save_gsheet_link(st.session_state.office, new_link)
-                st.success("✅ تم حفظ اللينك!")
-                st.rerun()
+                sid_check = extract_sheet_id(new_link) if new_link else None
+                if not new_link:
+                    st.error("ادخلي اللينك الأول!")
+                elif not sid_check:
+                    st.error("اللينك مش صح!")
+                else:
+                    ok = save_gsheet_link(st.session_state.office, new_link)
+                    if ok:
+                        st.success("✅ تم حفظ اللينك!")
+                        st.rerun()
+                    else:
+                        st.error("❌ حصل خطأ وما اتحفظش اللينك — جربي تاني، أو أكدي إن اسم المكتب متطابق في حسابك.")
         sheet_id_source = extract_sheet_id(saved_link)
     else:
         new_link = st.text_input("الصق لينك Google Sheets هنا:")
@@ -679,9 +689,12 @@ elif source == "🔗 ربط Google Sheets":
             if new_link:
                 sid = extract_sheet_id(new_link)
                 if sid:
-                    save_gsheet_link(st.session_state.office, new_link)
-                    st.success("✅ تم حفظ اللينك!")
-                    st.rerun()
+                    ok = save_gsheet_link(st.session_state.office, new_link)
+                    if ok:
+                        st.success("✅ تم حفظ اللينك!")
+                        st.rerun()
+                    else:
+                        st.error("❌ حصل خطأ وما اتحفظش اللينك — جربي تاني، أو أكدي إن اسم المكتب متطابق في حسابك.")
                 else:
                     st.error("اللينك مش صح!")
             else:
@@ -702,11 +715,22 @@ elif source == "🔗 ربط Google Sheets":
                         st.stop()
                     file_bytes = result.read()
                     filename = "google_sheet"
+                    # احفظيها في session_state عشان متضيعش لما الصفحة تعمل rerun
+                    st.session_state.pending_file_bytes = file_bytes
+                    st.session_state.pending_filename = filename
+                    st.success("✅ اتجابت بيانات الشيت! دوسي '▶ ابدأ' تحت عشان تبدأي المعالجة.")
         else:
             uploaded2 = st.file_uploader("ارفع الإكسيل الجديد", type=["xlsx", "xls"])
             if uploaded2:
                 file_bytes = uploaded2.read()
                 filename = uploaded2.name
+                st.session_state.pending_file_bytes = file_bytes
+                st.session_state.pending_filename = filename
+
+# لو مفيش file_bytes في المتغير المحلي (زي بعد rerun بتاع زرار "ابدأ التحديث")، رجعيه من session_state
+if not file_bytes and st.session_state.get("pending_file_bytes"):
+    file_bytes = st.session_state.pending_file_bytes
+    filename = st.session_state.get("pending_filename", filename)
 
 if file_bytes and st.button("▶ ابدأ"):
     log_to_sheet(st.session_state.office, "رفع ملف", filename)
@@ -783,6 +807,10 @@ if file_bytes and st.button("▶ ابدأ"):
     # ارفع الإكسيل على Drive
     upload_to_drive(out.getvalue(), filename, st.session_state.office)
     log_to_sheet(st.session_state.office, "اكتمل المعالجة", filename)
+
+    # امسحي الملف المؤقت من session_state عشان مايتشغلش تاني بالغلط
+    st.session_state.pending_file_bytes = None
+    st.session_state.pending_filename = ""
 
     # احفظ النتائج للبحث
     st.session_state.last_results = [
