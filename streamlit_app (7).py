@@ -637,6 +637,11 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# ===== منع ترجمة المتصفح التلقائية (كانت بتلخبط عناصر الصفحة زي حقل كلمة المرور وزرار الرفع) =====
+st.markdown("""
+<meta name="google" content="notranslate">
+""", unsafe_allow_html=True)
+
 st.markdown("""
 <style>
 /* ===== Global ===== */
@@ -645,6 +650,7 @@ st.markdown("""
 html, body, [class*="css"], .stApp {
     font-family: 'Cairo', sans-serif !important;
     direction: rtl;
+    translate: no; /* منع ترجمة المتصفح التلقائية اللي بتلخبط الـ DOM */
 }
 .stApp { background: #f5f7fb; color: #111827; }
 [data-testid="stAppViewContainer"] > .main { background: #f5f7fb; }
@@ -763,9 +769,18 @@ div[data-testid="stAlert"] p { font-size:13px !important; font-weight:600 !impor
 .status-error { background:#fef2f2; color:#b91c1c; }
 .status-info { background:#eff6ff; color:#1d4ed8; }
 
-/* ===== Hide Streamlit input instructions / password visibility ===== */
-[data-testid="InputInstructions"], div[data-baseweb="input"] + div small { display:none !important; }
-div[data-baseweb="input"]:has(input[type="password"]) button { display:none !important; }
+/* ===== Hide Streamlit input instructions / password visibility toggle =====
+   استخدمنا selector مش معتمد على :has() عشان يشتغل على كل المتصفحات
+   وعشان نتجنب ظهور زرار "Upload" مكرر بسبب ترجمة المتصفح أو أي DOM إضافي غريب */
+[data-testid="InputInstructions"] { display:none !important; }
+[data-testid="stTextInput"] button {
+    display:none !important;
+    visibility:hidden !important;
+    width:0 !important;
+    height:0 !important;
+    padding:0 !important;
+    margin:0 !important;
+}
 
 /* ===== Mobile ===== */
 @media (max-width: 700px) {
