@@ -235,9 +235,11 @@ def save_gsheet_link(office, link):
             all_names = [str(r.get("اسم المكتب", "")).strip() for r in records]
             return False, f"مش لاقي مكتب اسمه '{target}' في شيت الحسابات. الأسماء الموجودة فعلاً: {all_names}"
 
-        # لو مفيش عمود للينك، ضيفيه
+        # لو مفيش عمود للينك، ضيفيه (مع توسيع الشيت لو لازم)
         if "لينك الشيت" not in headers:
             col_num = len(headers) + 1
+            if col_num > sheet.col_count:
+                sheet.add_cols(col_num - sheet.col_count)
             sheet.update_cell(1, col_num, "لينك الشيت")
         else:
             col_num = headers.index("لينك الشيت") + 1
