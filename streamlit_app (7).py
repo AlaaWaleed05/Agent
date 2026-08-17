@@ -1,5 +1,6 @@
 """
-ادرس في مصر - Agent
+Aivora - Agent
+Your Smarter Support for Every Student's Application
 Streamlit App
 """
 
@@ -238,7 +239,7 @@ def save_gsheet_link(office, link):
     try:
         sheet = get_accounts_sheet()
         if not sheet:
-            return False, "مش قادر أوصل لشيت الحسابات (accounts sheet) — تأكد من صلاحيات الـ service account."
+            return False, "مش قادر أوصل لشيت الحسابات (accounts sheet) — تأكدي من صلاحيات الـ service account."
 
         headers = sheet.row_values(1)
         target = str(office).strip()
@@ -420,7 +421,7 @@ def search_results_in_sheet(office, name_query):
 
         all_values = sheet.get_all_values()
         if len(all_values) <= 1:
-            return [], "مفيش نتائج محفوظة لأي مكتب لسه — لازم تعمل '▶ ابدأ' مرة واحدة الأول."
+            return [], "مفيش نتائج محفوظة لأي مكتب لسه — لازم تعملي '▶ ابدأ' مرة واحدة الأول."
 
         target_office = str(office).strip()
         query = str(name_query).strip()
@@ -631,8 +632,8 @@ def find_excel_columns(ws):
 # ==================== الواجهة ====================
 st.set_page_config(
     menu_items={"Get help": None, "Report a bug": None, "About": None},
-    page_title="ادرس في مصر - Agent",
-    page_icon="🎓",
+    page_title="Aivora - Agent",
+    page_icon="✨",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -767,9 +768,28 @@ button[data-baseweb="tab"][aria-selected="true"] { color:#2563eb !important; }
     background:#f8fafc !important; border:1.5px dashed #cbd5e1 !important; border-radius:14px !important;
 }
 [data-testid="stFileUploaderDropzone"] button {
-    background:#fff !important; color:#2563eb !important; border:1px solid #bfdbfe !important;
+    background:#fff !important; border:1px solid #bfdbfe !important;
     border-radius:8px !important;
+    position:relative !important;
+    /* بنخفي أي نص أصلي (حتى لو بيتكرر بصريًا لأي سبب) ونعرض تسمية واحدة ثابتة بدلاً منه */
+    font-size:0 !important;
+    color:transparent !important;
+    text-shadow:none !important;
+    min-width:110px;
 }
+[data-testid="stFileUploaderDropzone"] button::after {
+    content: "اختيار ملف";
+    position:absolute;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-family:'Cairo', sans-serif !important;
+    font-size:14px !important;
+    font-weight:700 !important;
+    color:#2563eb !important;
+}
+[data-testid="stFileUploaderDropzone"] button * { display:none !important; }
 
 /* ===== Alerts ===== */
 div[data-testid="stAlert"] { border-radius:12px !important; border:1px solid #e5e7eb !important; }
@@ -819,9 +839,9 @@ if "is_admin" not in st.session_state:
 if not st.session_state.logged_in and not st.session_state.is_admin:
     st.markdown("""
     <div style="text-align:center; margin:42px 0 24px;">
-        <div style="font-size:48px;">🎓</div>
-        <div style="font-size:31px;font-weight:800;color:#111827;">ادرس في مصر</div>
-        <div style="font-size:14px;color:#6b7280;margin-top:3px;">منصة متابعة طلبات الطلاب للمكاتب</div>
+        <div style="font-size:48px;">✨</div>
+        <div style="font-size:31px;font-weight:800;color:#111827;">Aivora</div>
+        <div style="font-size:14px;color:#6b7280;margin-top:3px;">Your Smarter Support for Every Student's Application</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -846,7 +866,7 @@ if not st.session_state.logged_in and not st.session_state.is_admin:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         tab1, tab2 = st.tabs(["تسجيل الدخول", "حساب جديد"])
         with tab1:
-            st.markdown("<div style='font-size:22px;font-weight:800;color:#111827;margin:8px 0 3px;'>مرحبًا بعودتك 👋</div><div style='color:#6b7280;font-size:13px;margin-bottom:18px;'>سجلي دخولك لإدارة طلبات الطلاب</div>", unsafe_allow_html=True)
+            st.markdown("<div style='font-size:22px;font-weight:800;color:#111827;margin:8px 0 3px;'>مرحبًا بعودتك 👋</div><div style='color:#6b7280;font-size:13px;margin-bottom:18px;'>سجل دخولك لإدارة طلبات الطلاب</div>", unsafe_allow_html=True)
             username = st.text_input("اسم المكتب", key="login_user", placeholder="اكتب اسم المكتب")
             password = st.text_input("كلمة المرور", type="password", key="login_pass", placeholder="اكتب كلمة المرور")
             if st.button("تسجيل الدخول", key="login_btn"):
@@ -863,7 +883,7 @@ if not st.session_state.logged_in and not st.session_state.is_admin:
                     else:
                         st.error(msg)
         with tab2:
-            st.markdown("<div style='font-size:22px;font-weight:800;color:#111827;margin:8px 0 3px;'>إنشاء حساب</div><div style='color:#6b7280;font-size:13px;margin-bottom:18px;'>سجلي مكتبك لبدء استخدام الخدمة</div>", unsafe_allow_html=True)
+            st.markdown("<div style='font-size:22px;font-weight:800;color:#111827;margin:8px 0 3px;'>إنشاء حساب</div><div style='color:#6b7280;font-size:13px;margin-bottom:18px;'>سجل مكتبك لبدء استخدام الخدمة</div>", unsafe_allow_html=True)
             new_office = st.text_input("اسم المكتب", key="reg_office", placeholder="اسم المكتب")
             new_email = st.text_input("الإيميل", key="reg_email", placeholder="example@email.com")
             new_pass = st.text_input("كلمة المرور", type="password", key="reg_pass", placeholder="كلمة المرور")
@@ -886,8 +906,8 @@ if not st.session_state.logged_in and not st.session_state.is_admin:
 st.markdown("""
 <div class="topbar">
     <div class="brand">
-        <div class="brand-icon">🎓</div>
-        <div><div class="brand-title">ادرس في مصر</div><div class="brand-sub">لوحة متابعة الطلبات</div></div>
+        <div class="brand-icon">✨</div>
+        <div><div class="brand-title">Aivora</div><div class="brand-sub">Your Smarter Support for Every Student's Application</div></div>
     </div>
     <div style="font-size:13px;color:#6b7280;">نظام متابعة المكاتب</div>
 </div>
@@ -933,7 +953,7 @@ office = st.session_state.office
 st.markdown(f"""
 <div class="hero">
     <div class="hero-kicker">{_greeting} 👋</div>
-    <div class="hero-title">أهلاً بك، <strong>{office}</strong></div>
+    <div class="hero-title">أهلاً بيك، <strong>{office}</strong></div>
     <div class="hero-desc">تابع طلبات طلابك وحدّث الحالات من مكان واحد.</div>
 </div>
 """, unsafe_allow_html=True)
@@ -944,7 +964,7 @@ st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
 
 # ===== Data source card =====
 st.markdown("<div class='card'>", unsafe_allow_html=True)
-st.markdown("<div class='section-title'>مصدر بيانات الطلاب</div><div class='section-sub'>اختر الطريقة التي بها ملف الطلاب.</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-title'>مصدر بيانات الطلاب</div><div class='section-sub'>اختر الطريقة التي يحتوي بها ملف الطلاب.</div>", unsafe_allow_html=True)
 source_options = ["📂 رفع ملف Excel", "🔗 ربط Google Sheets"]
 source = st.radio("", source_options, horizontal=True, label_visibility="collapsed")
 
@@ -969,7 +989,7 @@ else:
             if st.button("حفظ الرابط"):
                 sid_check = extract_sheet_id(new_link) if new_link else None
                 if not new_link:
-                    st.error("ادخلي الرابط أولاً!")
+                    st.error("أدخل الرابط أولاً!")
                 elif not sid_check:
                     st.error("الرابط غير صحيح!")
                 else:
@@ -1019,7 +1039,7 @@ if not file_bytes and st.session_state.get("pending_file_bytes"):
 # ===== Processing =====
 if file_bytes:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>تحديث حالات الطلاب</div><div class='section-sub'>اضغطي الزر لبدء فحص الطلبات وتحديث النتائج.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>تحديث حالات الطلاب</div><div class='section-sub'>اضغط الزر لبدء فحص الطلبات وتحديث النتائج.</div>", unsafe_allow_html=True)
     if st.button("▶ تحديث حالات الطلاب", key="start_main"):
         log_to_sheet(office, "رفع ملف", filename)
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
@@ -1072,7 +1092,7 @@ if file_bytes:
 
 # ===== Search =====
 st.markdown("<div class='card'>", unsafe_allow_html=True)
-st.markdown("<div class='section-title'>البحث عن طالب</div><div class='section-sub'>اكتبي اسم الطالب لمعرفة آخر حالة محفوظة.</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-title'>البحث عن طالب</div><div class='section-sub'>اكتب اسم الطالب لمعرفة آخر حالة محفوظة.</div>", unsafe_allow_html=True)
 search_query = st.text_input("اسم الطالب", placeholder="مثال: Ahmed Mohamed", label_visibility="collapsed")
 if search_query:
     with st.spinner("بيبحث..."):
