@@ -383,9 +383,35 @@ def extract_sheet_id(link):
     return None
 
 
-def read_gsheet_as_excel(sheet_id):
-    """بيقرا Google Sheet ويرجعه كـ BytesIO زي إكسيل"""
+def extract_gid(link):
+    """بيستخرج رقم الـ gid (بيحدد التبويب/الشيت بالظبط جوه الملف) من اللينك لو موجود"""
+    import re
+    match = re.search(r'[?#&]gid=(\d+)', link)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def get_target_worksheet(spreadsheet, link):
+    """بيرجع التبويب المطابق بالظبط للينك المحفوظ (حسب gid)، أو أول تبويب لو مفيش gid في اللينك"""
+    gid = extract_gid(link)
+    if gid is not None:
+        try:
+            for ws in spreadsheet.worksheets():
+                if ws.id == gid:
+                    return ws
+        except Exception:
+            pass
+    return spreadsheet.sheet1
+
+
+def read_gsheet_as_excel(link):
+    """بيقرا التبويب المحدد في اللينك (حسب gid) من Google Sheet ويرجعه كـ BytesIO زي إكسيل"""
     try:
+        sheet_id = extract_sheet_id(link)
+        if not sheet_id:
+            return None, "الرابط غير صحيح!"
+
         creds_dict = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(
             creds_dict,
@@ -394,7 +420,7 @@ def read_gsheet_as_excel(sheet_id):
         )
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(sheet_id)
-        ws = spreadsheet.sheet1
+        ws = get_target_worksheet(spreadsheet, link)
         data = ws.get_all_values()
 
         if not data:
@@ -413,9 +439,13 @@ def read_gsheet_as_excel(sheet_id):
         return None, str(e)
 
 
-def write_back_to_gsheet(sheet_id, wb):
-    """بيكتب النتائج تاني في Google Sheet"""
+def write_back_to_gsheet(link, wb):
+    """بيكتب النتائج تاني في نفس التبويب المحدد في اللينك (حسب gid)"""
     try:
+        sheet_id = extract_sheet_id(link)
+        if not sheet_id:
+            return False
+
         creds_dict = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(
             creds_dict,
@@ -424,7 +454,7 @@ def write_back_to_gsheet(sheet_id, wb):
         )
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(sheet_id)
-        ws = spreadsheet.sheet1
+        ws = get_target_worksheet(spreadsheet, link)
         wsheet = wb.active
 
         # حدث كل الخلايا
@@ -680,10 +710,20 @@ def get_status(session, csrf_token):
 def find_excel_columns(ws):
     cols = {"name": None, "email": None, "password": None, "status": None}
     header_row_num = None
+    header_len = 0
     for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=5, values_only=True), start=1):
         row_values = [str(c).strip() if c else "" for c in row]
         if any("يميل" in v or "mail" in v.lower() for v in row_values):
             header_row_num = row_idx
+            header_len = len(row_values)
+
+            # أولوية: عمود اسمه "حالة الطلب الجديدة" تحديدًا - ده العمود اللي هنكتب فيه التحديث،
+            # عشان ميتلخبطش مع أي عمود "حالة الطلب" أصلي موجود أصلاً في ملف المكتب
+            for i, cell in enumerate(row_values):
+                if "حالة" in cell and "الجديدة" in cell:
+                    cols["status"] = i
+                    break
+
             for i, cell in enumerate(row_values):
                 cell_lower = cell.lower()
                 if any(k in cell for k in ["اسم", "الإسم", "الاسم"]) or "name" in cell_lower:
@@ -692,8 +732,6 @@ def find_excel_columns(ws):
                     cols["email"] = i
                 elif any(k in cell for k in ["باسورد", "كلمة المرور", "password", "pass"]) or "pass" in cell_lower:
                     cols["password"] = i
-                elif any(k in cell for k in ["حالة", "الحالة", "status"]):
-                    cols["status"] = i
             break
     if header_row_num is None:
         raise Exception("مش لاقي هيدر الإكسيل!")
@@ -701,6 +739,13 @@ def find_excel_columns(ws):
         raise Exception("مش لاقي عمود الإيميل!")
     if cols["password"] is None:
         raise Exception("مش لاقي عمود الباسورد!")
+
+    # لو عمود "حالة الطلب الجديدة" مش موجود أصلاً، نضيفه تلقائيًا في آخر الشيت
+    if cols["status"] is None:
+        new_col_index = header_len
+        ws.cell(row=header_row_num, column=new_col_index + 1, value="حالة الطلب الجديدة")
+        cols["status"] = new_col_index
+
     return cols, header_row_num
 
 
@@ -1092,7 +1137,7 @@ else:
         if update_option == "🔄 تحديث من الشيت الأونلاين":
             if st.button("تحميل بيانات الشيت"):
                 with st.spinner("بيقرأ الشيت..."):
-                    result, err = read_gsheet_as_excel(sheet_id_source)
+                    result, err = read_gsheet_as_excel(saved_link)
                     if err:
                         st.error(f"خطأ: {err}"); st.stop()
                     file_bytes = result.read(); filename = "google_sheet"
@@ -1185,7 +1230,7 @@ if file_bytes:
         out = io.BytesIO(); wb.save(out); out.seek(0)
         if sheet_id_source and source == "🔗 ربط Google Sheets":
             with st.spinner("بيحدث Google Sheets..."):
-                write_back_to_gsheet(sheet_id_source, wb)
+                write_back_to_gsheet(saved_link, wb)
             st.success("تم تحديث Google Sheets تلقائيًا!")
         up_ok, up_msg = upload_to_drive(out.getvalue(), filename, office)
         if up_ok: st.caption("تم حفظ نسخة احتياطية على Drive")
