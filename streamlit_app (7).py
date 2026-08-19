@@ -1242,14 +1242,17 @@ if file_bytes:
             processed_results.append({"name": str(display_name), "status": str(current_status)})
             save_results_to_sheet(office, processed_results)
 
+            # لو المصدر شيت Google متربط، اكتبي فيه أول بأول برضو (مش بس في الآخر)
+            # عشان لو التحديث اتقطع فجأة، الشيت بتاع المكتب نفسه يكون فيه اللي اتحدث فعلاً
+            if sheet_id_source and source == "🔗 ربط Google Sheets":
+                write_back_to_gsheet(saved_link, wb)
+
             progress.progress((idx + 1) / max(total, 1))
             if idx < total - 1: human_delay(5, 10)
 
         out = io.BytesIO(); wb.save(out); out.seek(0)
         if sheet_id_source and source == "🔗 ربط Google Sheets":
-            with st.spinner("بيحدث Google Sheets..."):
-                write_back_to_gsheet(saved_link, wb)
-            st.success("تم تحديث Google Sheets تلقائيًا!")
+            st.success("تم تحديث Google Sheets تلقائيًا أول بأول أثناء التحديث!")
         up_ok, up_msg = upload_to_drive(out.getvalue(), filename, office)
         if up_ok: st.caption("تم حفظ نسخة احتياطية على Drive")
         log_to_sheet(office, "اكتمل المعالجة", filename)
