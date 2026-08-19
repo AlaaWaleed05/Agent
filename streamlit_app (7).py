@@ -1226,7 +1226,9 @@ if file_bytes:
 
             session, csrf_token, err = api_login(email, password)
             if err or not session:
-                current_status = "فشل تسجيل الدخول"
+                # بنسيب سبب الفشل الحقيقي جوه الحالة (كود الخطأ من الموقع) عشان تقدري تفرقي
+                # بين فشل باسورد/إيميل غلط وبين حظر/rate-limit مؤقت من موقع الحكومة نفسه
+                current_status = f"فشل تسجيل الدخول ({err})" if err else "فشل تسجيل الدخول"
                 if cols["status"] is not None: row[cols["status"]].value = current_status
                 failed += 1
             else:
