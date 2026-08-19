@@ -135,10 +135,20 @@ def get_status(session, csrf_token):
 def find_excel_columns(ws):
     cols = {"name": None, "email": None, "password": None, "status": None}
     header_row_num = None
+    header_len = 0
     for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=5, values_only=True), start=1):
         row_values = [str(c).strip() if c else "" for c in row]
         if any("يميل" in v or "mail" in v.lower() for v in row_values):
             header_row_num = row_idx
+            header_len = len(row_values)
+
+            # أولوية: عمود اسمه "حالة الطلب الجديدة" تحديدًا - ده العمود اللي هنكتب فيه التحديث،
+            # عشان ميتلخبطش مع أي عمود "حالة الطلب" أصلي موجود أصلاً في ملف المكتب
+            for i, cell in enumerate(row_values):
+                if "حالة" in cell and "الجديدة" in cell:
+                    cols["status"] = i
+                    break
+
             for i, cell in enumerate(row_values):
                 cell_lower = cell.lower()
                 if any(k in cell for k in ["اسم", "الإسم", "الاسم"]) or "name" in cell_lower:
@@ -147,8 +157,6 @@ def find_excel_columns(ws):
                     cols["email"] = i
                 elif any(k in cell for k in ["باسورد", "كلمة المرور", "password", "pass"]) or "pass" in cell_lower:
                     cols["password"] = i
-                elif any(k in cell for k in ["حالة", "الحالة", "status"]):
-                    cols["status"] = i
             break
     if header_row_num is None:
         raise Exception("مش لاقي هيدر الإكسيل!")
@@ -156,6 +164,13 @@ def find_excel_columns(ws):
         raise Exception("مش لاقي عمود الإيميل!")
     if cols["password"] is None:
         raise Exception("مش لاقي عمود الباسورد!")
+
+    # لو عمود "حالة الطلب الجديدة" مش موجود أصلاً، نضيفه تلقائيًا في آخر الشيت
+    if cols["status"] is None:
+        new_col_index = header_len
+        ws.cell(row=header_row_num, column=new_col_index + 1, value="حالة الطلب الجديدة")
+        cols["status"] = new_col_index
+
     return cols, header_row_num
 
 
@@ -165,23 +180,44 @@ def extract_sheet_id(link):
     return match.group(1) if match else None
 
 
+def extract_gid(link):
+    """بيستخرج رقم الـ gid (بيحدد التبويب بالظبط جوه الملف) من اللينك لو موجود"""
+    import re
+    match = re.search(r"[?#&]gid=(\d+)", link)
+    return int(match.group(1)) if match else None
+
+
+def get_target_worksheet(spreadsheet, link):
+    """بيرجع التبويب المطابق بالظبط للينك المحفوظ (حسب gid)، أو أول تبويب لو مفيش gid"""
+    gid = extract_gid(link)
+    if gid is not None:
+        try:
+            for ws in spreadsheet.worksheets():
+                if ws.id == gid:
+                    return ws
+        except Exception:
+            pass
+    return spreadsheet.sheet1
+
+
 # ==================== Data source (Google Sheet المربوط أو آخر نسخة Drive) ====================
 
 def get_office_source_workbook(client, office, gsheet_link):
-    """بيرجع (workbook, source_type, sheet_id) — source_type: 'gsheet' أو 'drive' أو None"""
+    """بيرجع (workbook, source_type, source_link) — source_type: 'gsheet' أو 'drive' أو None.
+    لو gsheet، بيرجع اللينك الكامل (مش الـ ID بس) عشان write_back_to_gsheet يقدر يحدد نفس التبويب بالظبط."""
     if gsheet_link:
         sid = extract_sheet_id(gsheet_link)
         if sid:
             try:
                 spreadsheet = client.open_by_key(sid)
-                ws = spreadsheet.sheet1
+                ws = get_target_worksheet(spreadsheet, gsheet_link)
                 data = ws.get_all_values()
                 if data:
                     wb = openpyxl.Workbook()
                     wsheet = wb.active
                     for row in data:
                         wsheet.append(row)
-                    return wb, "gsheet", sid
+                    return wb, "gsheet", gsheet_link
             except Exception as e:
                 print(f"تعذر قراءة الشيت المربوط للمكتب {office}: {e}")
 
@@ -243,10 +279,15 @@ def upload_backup_to_drive(file_bytes, filename, office):
         print(f"فشل رفع نسخة احتياطية للمكتب {office}: {e}")
 
 
-def write_back_to_gsheet(client, sheet_id, wb):
+def write_back_to_gsheet(client, link, wb):
+    """بيكتب النتائج تاني في نفس التبويب المحدد في اللينك (حسب gid)"""
     try:
+        sheet_id = extract_sheet_id(link)
+        if not sheet_id:
+            print("فشل تحديث Google Sheet: الرابط غير صحيح")
+            return
         spreadsheet = client.open_by_key(sheet_id)
-        ws = spreadsheet.sheet1
+        ws = get_target_worksheet(spreadsheet, link)
         wsheet = wb.active
         data = [[str(c) if c is not None else "" for c in row] for row in wsheet.iter_rows(values_only=True)]
         ws.clear()
@@ -364,7 +405,7 @@ def save_results_to_sheet(client, office, results):
 
 def process_office(client, office, gsheet_link, office_email):
     print(f"--- بدء تحديث تلقائي للمكتب: {office} ---")
-    wb, source_type, sid = get_office_source_workbook(client, office, gsheet_link)
+    wb, source_type, source_link = get_office_source_workbook(client, office, gsheet_link)
     if wb is None:
         print(f"لا يوجد ملف محفوظ للمكتب {office}، تم التخطي.")
         return
@@ -400,8 +441,8 @@ def process_office(client, office, gsheet_link, office_email):
     wb.save(out)
     out.seek(0)
 
-    if source_type == "gsheet" and sid:
-        write_back_to_gsheet(client, sid, wb)
+    if source_type == "gsheet" and source_link:
+        write_back_to_gsheet(client, source_link, wb)
 
     upload_backup_to_drive(out.getvalue(), "auto_update.xlsx", office)
 
