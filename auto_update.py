@@ -63,23 +63,89 @@ def human_delay(min_sec=2, max_sec=5):
     time.sleep(random.uniform(min_sec, max_sec))
 
 
-def api_login(email, password):
-    try:
+def api_login(email, password, max_retries=3):
+    last_err = None
+
+    for attempt in range(1, max_retries + 1):
         session = requests.Session()
         session.headers.update(HEADERS_BASE)
-        human_delay(2, 4)
-        res = session.post(
-            f"{BASE_URL}/student/login",
-            json={"email": email, "password": password},
-            timeout=30,
-        )
-        if res.status_code not in [200, 201]:
-            return None, None, f"فشل اللوجين - كود: {res.status_code}"
-        human_delay(2, 3)
-        csrf_token = res.json().get("token", "") or res.headers.get("x-csrf-token", "")
-        return session, csrf_token, None
-    except Exception as e:
-        return None, None, str(e)
+
+        try:
+            human_delay(3, 6)
+
+            res = session.post(
+                f"{BASE_URL}/student/login",
+                json={
+                    "email": email,
+                    "password": password
+                },
+                timeout=(10, 30),
+            )
+
+            if res.status_code in [200, 201]:
+                human_delay(2, 4)
+
+                csrf_token = (
+                    res.json().get("token", "")
+                    or res.headers.get("x-csrf-token", "")
+                )
+
+                return session, csrf_token, None
+
+            last_err = f"فشل اللوجين - كود: {res.status_code}"
+
+            # نعيد المحاولة فقط لو المشكلة مؤقتة
+            if res.status_code == 429 or res.status_code >= 500:
+                if attempt < max_retries:
+                    wait = min(60, 5 * (2 ** (attempt - 1)))
+                    wait += random.uniform(0, 3)
+
+                    print(
+                        f"Login مؤقتًا فشل ({res.status_code}) "
+                        f"- محاولة {attempt}/{max_retries}, "
+                        f"انتظار {wait:.1f} ثانية"
+                    )
+
+                    time.sleep(wait)
+                    continue
+
+            return None, None, last_err
+
+        except (
+            requests.exceptions.SSLError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ) as e:
+
+            last_err = str(e)
+
+            try:
+                session.close()
+            except Exception:
+                pass
+
+            if attempt < max_retries:
+                wait = min(60, 5 * (2 ** (attempt - 1)))
+                wait += random.uniform(0, 3)
+
+                print(
+                    f"خطأ اتصال مؤقت: {type(e).__name__} "
+                    f"- محاولة {attempt}/{max_retries}, "
+                    f"إعادة المحاولة بعد {wait:.1f} ثانية"
+                )
+
+                time.sleep(wait)
+                continue
+
+        except Exception as e:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+            return None, None, str(e)
+
+    return None, None, last_err or "فشل تسجيل الدخول بعد عدة محاولات"
 
 
 def api_logout(session):
