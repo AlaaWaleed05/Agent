@@ -492,7 +492,9 @@ def get_results_sheet():
 
 
 def save_results_to_sheet(office, results):
-    """بيحفظ آخر نتائج المكتب في ورقة 'results' — بيمسح القديم بتاع المكتب ده ويكتب الجديد"""
+    """بيحفظ آخر نتائج المكتب في ورقة 'results' — بيمسح القديم بتاع المكتب ده ويكتب الجديد.
+    بتتنادى بعد كل طالب أثناء التحديث (مش بس في الآخر) عشان لو الصفحة اتقفلت أو
+    التحديث اتوقف فجأة، النتائج اللي خلصت فعلاً تكون محفوظة أولاً بأول."""
     try:
         sheet = get_results_sheet()
         if not sheet:
@@ -1208,22 +1210,38 @@ if file_bytes:
         total = len(valid_rows)
         progress = st.progress(0)
         status_placeholder = st.empty()
+        results_list_placeholder = st.container()
         success = failed = 0
+        # النتائج اللي خلصت فعلاً — بتتحفظ أول بأول في شيت "results" بعد كل طالب،
+        # فلو التحديث اتوقف فجأة (قفل التاب / نت وقع)، اللي اتحدث فعلاً يفضل محفوظ ومتسجل.
+        processed_results = []
 
         for idx, row in enumerate(valid_rows):
             email = str(row[cols["email"]].value).strip()
             password = str(row[cols["password"]].value).strip()
             name = row[cols["name"]].value if cols["name"] is not None else ""
-            status_placeholder.markdown(f"**جاري تحديث:** {name or email}<br><span style='color:#6b7280'>طالب {idx+1} من {total}</span>", unsafe_allow_html=True)
+            display_name = name or email
+
+            status_placeholder.markdown(f"**جاري تحديث:** {display_name}<br><span style='color:#6b7280'>طالب {idx+1} من {total}</span>", unsafe_allow_html=True)
+
             session, csrf_token, err = api_login(email, password)
             if err or not session:
-                if cols["status"] is not None: row[cols["status"]].value = "فشل تسجيل الدخول"
+                current_status = "فشل تسجيل الدخول"
+                if cols["status"] is not None: row[cols["status"]].value = current_status
                 failed += 1
             else:
-                app_num, status = get_status(session, csrf_token)
-                if cols["status"] is not None: row[cols["status"]].value = status
+                app_num, current_status = get_status(session, csrf_token)
+                if cols["status"] is not None: row[cols["status"]].value = current_status
                 api_logout(session)
                 success += 1
+
+            # اعرضي النتيجة اللي طلعت للطالب ده قدام المستخدم فورًا
+            status_placeholder.markdown(f"**{display_name}:** {current_status}<br><span style='color:#6b7280'>طالب {idx+1} من {total}</span>", unsafe_allow_html=True)
+
+            # سجليه في قايمة النتائج المتراكمة واحفظيها فورًا في شيت النتائج
+            processed_results.append({"name": str(display_name), "status": str(current_status)})
+            save_results_to_sheet(office, processed_results)
+
             progress.progress((idx + 1) / max(total, 1))
             if idx < total - 1: human_delay(5, 10)
 
@@ -1237,9 +1255,8 @@ if file_bytes:
         log_to_sheet(office, "اكتمل المعالجة", filename)
         st.session_state.pending_file_bytes = None
         st.session_state.pending_filename = ""
-        st.session_state.last_results = [{"name": str(r[cols["name"]].value if cols["name"] is not None else ""), "status": str(r[cols["status"]].value if cols["status"] is not None else "")} for r in valid_rows]
-        with st.spinner("بيحفظ النتائج للبحث..."):
-            res_ok, res_msg = save_results_to_sheet(office, st.session_state.last_results)
+        # النتائج اتحفظت أول بأول أثناء الحلقة، فمفيش داعي نحفظها تاني هنا
+        st.session_state.last_results = processed_results
         st.markdown(f"<div style='background:#ecfdf5;border:1px solid #bbf7d0;border-radius:14px;padding:16px;margin-top:15px;'><div style='font-size:17px;font-weight:800;color:#166534;'>اكتمل التحديث 🎉</div><div style='color:#166534;font-size:13px;margin-top:4px;'>إجمالي {total} طالب · نجح {success} · فشل {failed}</div></div>", unsafe_allow_html=True)
         st.download_button(label="⬇ تحميل ملف Excel المحدث", data=out, file_name="students_updated.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.markdown('</div>', unsafe_allow_html=True)
