@@ -296,16 +296,14 @@ def compute_changes(previous_results, new_results):
 
 
 def build_email_message(office, changes):
-    """بيبني نص الإيميل (نص عادي) بأسماء الطلاب اللي اتغيرت حالتهم بس"""
+    """بيبني نص الإيميل: قايمة مرقّمة بالاسم والحالة الجديدة بس (من غير الحالة القديمة)"""
     lines = [f"تحديث حالات الطلاب - {office}", ""]
-    shown = changes[:100]
-    for c in shown:
-        if c["old_status"] is None:
-            lines.append(f"- {c['name']}: {c['new_status']} (جديد)")
-        else:
-            lines.append(f"- {c['name']}: {c['old_status']} <- {c['new_status']}")
-    if len(changes) > 100:
-        lines.append(f"...و{len(changes) - 100} طالب/ة تاني اتغيرت حالتهم")
+    shown = changes[:200]
+    for idx, c in enumerate(shown, start=1):
+        lines.append(f"{idx}. {c['name']} - {c['new_status']}")
+    if len(changes) > 200:
+        lines.append("")
+        lines.append(f"...و{len(changes) - 200} طالب/ة تاني اتغيرت حالتهم")
     lines.append("")
     lines.append(f"إجمالي التغييرات: {len(changes)}")
     return "\n".join(lines)
