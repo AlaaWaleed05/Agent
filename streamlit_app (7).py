@@ -622,7 +622,7 @@ def api_login(email, password, max_retries=3):
             session.headers.update(HEADERS_BASE)
 
             # استنى شوية قبل اللوجين
-            human_delay(2, 4)
+            human_delay(3, 6)
 
             res = session.post(
                 f"{BASE_URL}/student/login",
@@ -639,7 +639,7 @@ def api_login(email, password, max_retries=3):
                 return None, None, last_err
 
             # استنى شوية بعد اللوجين
-            human_delay(2, 3)
+            human_delay(2, 4)
 
             csrf_token = res.json().get("token", "") or res.headers.get("x-csrf-token", "")
 
@@ -1268,7 +1268,7 @@ if file_bytes:
                 write_back_to_gsheet(saved_link, wb)
 
             progress.progress((idx + 1) / max(total, 1))
-            if idx < total - 1: human_delay(5, 10)
+            if idx < total - 1: human_delay(10, 18)
 
         out = io.BytesIO(); wb.save(out); out.seek(0)
         if sheet_id_source and source == "🔗 ربط Google Sheets":
