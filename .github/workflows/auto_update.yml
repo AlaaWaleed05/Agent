@@ -5,10 +5,17 @@ on:
     # بيتشغل كل ساعة، والسكريبت نفسه بيقرر مين من المكاتب فعلاً محتاج تحديث
     # حسب "كل كام ساعة" اللي كل مكتب اختارها من الواجهة
     - cron: '0 * * * *'
-  workflow_dispatch: {}  # يسمح بتشغيله يدويًا من تبويب Actions لو حبيت تجربه فورًا
+  workflow_dispatch: {}
+
+# يمنع تشغيل نسختين من الـ auto update في نفس الوقت
+concurrency:
+  group: auto-update
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
