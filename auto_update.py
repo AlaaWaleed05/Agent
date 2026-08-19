@@ -9,6 +9,10 @@ auto_update.py
 الفرق الأساسي عن app.py: الملف ده مالوش أي تبعية على Streamlit (لأنه بيشتغل
 من غير أي حد فاتح الموقع)، وبياخد بيانات الاعتماد (service account + إيميل
 الإرسال) من متغيرات بيئة بدل st.secrets.
+
+قاعدة أساسية (مهم): في شيت المكتب المربوط، ممنوع نلمس أي عمود غير عمود
+"حالة الطلب الجديدة". مفيش مسح للشيت ولا إعادة كتابة لكل البيانات - بنكتب
+بس في خانات عمود الحالة، وترتيب صفوف المكتب يفضل زي ما هو تمامًا.
 """
 
 import os
@@ -24,6 +28,13 @@ from google.oauth2.service_account import Credentials
 
 SHEET_ID = "1BlFdtY-7ZIF1y2GwVosxlG9r7nK5xqYeW6yiIjPI_9U"
 DRIVE_FOLDER_ID = "12L_qSHBnW4-tfQZRteynInWNBAML016f"
+
+# الحالات دي معناها الطلب خلص خالص - لو طالب وصل لحد واحدة منها، الإيجنت ما
+# يعملش login تاني ليه في أي تحديث جاي، ويسيب حالته المحفوظة زي ما هي.
+FINAL_STATUSES = {
+    "تأكيد استلام الملف وصحة واكتمال المستندات",
+    "قبول نهائي",
+}
 
 BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"
 SITE_URL = "https://admission.study-in-egypt.gov.eg"
@@ -345,19 +356,50 @@ def upload_backup_to_drive(file_bytes, filename, office):
         print(f"فشل رفع نسخة احتياطية للمكتب {office}: {e}")
 
 
-def write_back_to_gsheet(client, link, wb):
-    """بيكتب النتائج تاني في نفس التبويب المحدد في اللينك (حسب gid)"""
+def _col_index_to_letter(col_idx0):
+    """بيحول رقم عمود (0-based) لحروف A1 (0 -> A, 1 -> B ...)"""
+    col_idx = col_idx0 + 1
+    letters = ""
+    while col_idx > 0:
+        col_idx, remainder = divmod(col_idx - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def write_back_to_gsheet(client, link, wb, cols, header_row_num):
+    """بيحدّث عمود 'حالة الطلب الجديدة' بس في شيت المكتب المربوط.
+    قاعدة أساسية: ممنوع نمسح الشيت أو نكتب فوق أي عمود تاني أو نغيّر ترتيب
+    الصفوف - إحنا بنكتب في نفس الخانات بتاعة عمود الحالة بس، والباقي زي
+    ما هو في شيت المكتب."""
     try:
         sheet_id = extract_sheet_id(link)
         if not sheet_id:
             print("فشل تحديث Google Sheet: الرابط غير صحيح")
             return
+
+        status_col_idx0 = cols.get("status")
+        if status_col_idx0 is None:
+            return
+
         spreadsheet = client.open_by_key(sheet_id)
         ws = get_target_worksheet(spreadsheet, link)
         wsheet = wb.active
-        data = [[str(c) if c is not None else "" for c in row] for row in wsheet.iter_rows(values_only=True)]
-        ws.clear()
-        ws.update(data)
+
+        values = []
+        for row in wsheet.iter_rows(min_row=header_row_num + 1, values_only=False):
+            cell = row[status_col_idx0]
+            values.append([str(cell.value) if cell.value is not None else ""])
+        if not values:
+            return
+
+        header_values = ws.row_values(header_row_num)
+        if len(header_values) <= status_col_idx0 or not header_values[status_col_idx0]:
+            ws.update_cell(header_row_num, status_col_idx0 + 1, "حالة الطلب الجديدة")
+
+        col_letter = _col_index_to_letter(status_col_idx0)
+        start_row = header_row_num + 1
+        end_row = start_row + len(values) - 1
+        ws.update(f"{col_letter}{start_row}:{col_letter}{end_row}", values)
     except Exception as e:
         print(f"فشل تحديث Google Sheet: {e}")
 
@@ -487,11 +529,28 @@ def process_office(client, office, gsheet_link, office_email):
     previous_results = get_previous_results(client, office)
 
     rows_data = list(ws.iter_rows(min_row=header_row_num + 1, values_only=False))
+    # كل طالب ليه إيميل وباسورد في ملف المكتب لازم يتاخد - مفيش تقسيم ولا حد أقصى،
+    # لو المكتب فيه 100 طالب بيتاخدوا الـ 100 كلهم، ولو 20 بيتاخدوا الـ 20 كلهم
     valid_rows = [r for r in rows_data if r[cols["email"]].value and r[cols["password"]].value]
 
-    for row in valid_rows:
+    # بنسجل الدخول بترتيب عشوائي مختلف كل مرة (shuffling) عشان الموقع الحكومي ما
+    # يلاحظش نمط ثابت. ده بيأثر بس على ترتيب طلبات تسجيل الدخول - كل row لسه
+    # مربوط بمكانه الحقيقي في شيت المكتب، فترتيب صفوف شيت المكتب ما بيتغيرش خالص.
+    processing_order = valid_rows.copy()
+    random.shuffle(processing_order)
+
+    for row in processing_order:
         email = str(row[cols["email"]].value).strip()
         password = str(row[cols["password"]].value).strip()
+        name = str(row[cols["name"]].value).strip() if cols["name"] is not None and row[cols["name"]].value else ""
+
+        prev_status = previous_results.get(name)
+        if prev_status in FINAL_STATUSES:
+            # الطلب خلص خالص - ما نضيعش وقت وnetwork calls عليه، نسيب حالته زي ما هي
+            if cols["status"] is not None:
+                row[cols["status"]].value = prev_status
+            continue
+
         session, csrf_token, err = api_login(email, password)
         if err or not session:
             if cols["status"] is not None:
@@ -508,7 +567,7 @@ def process_office(client, office, gsheet_link, office_email):
     out.seek(0)
 
     if source_type == "gsheet" and source_link:
-        write_back_to_gsheet(client, source_link, wb)
+        write_back_to_gsheet(client, source_link, wb, cols, header_row_num)
 
     upload_backup_to_drive(out.getvalue(), "auto_update.xlsx", office)
 
