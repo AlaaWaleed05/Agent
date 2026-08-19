@@ -611,33 +611,51 @@ def human_delay(min_sec=2, max_sec=5):
     time.sleep(random.uniform(min_sec, max_sec))
 
 
-def api_login(email, password):
-    """بيعمل لوجين ويرجع session جديدة فيها الكوكي"""
-    try:
-        session = requests.Session()
-        session.headers.update(HEADERS_BASE)
+def api_login(email, password, max_retries=3):
+    """بيعمل لوجين ويرجع session جديدة فيها الكوكي.
+    لو حصل خطأ اتصال/SSL مؤقت (زي الموقع بيقفل الكونكشن فجأة)، بيعيد المحاولة
+    كذا مرة بفاصل زمني متزايد قبل ما يعتبرها فشل نهائي."""
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            session = requests.Session()
+            session.headers.update(HEADERS_BASE)
 
-        # استنى شوية قبل اللوجين
-        human_delay(2, 4)
+            # استنى شوية قبل اللوجين
+            human_delay(2, 4)
 
-        res = session.post(
-            f"{BASE_URL}/student/login",
-            json={"email": email, "password": password},
-            timeout=30
-        )
+            res = session.post(
+                f"{BASE_URL}/student/login",
+                json={"email": email, "password": password},
+                timeout=30
+            )
 
-        if res.status_code not in [200, 201]:
-            return None, None, f"فشل اللوجين - كود: {res.status_code}"
+            if res.status_code not in [200, 201]:
+                last_err = f"فشل اللوجين - كود: {res.status_code}"
+                # لو كود 429 (طلبات كتير) أو 5xx (مشكلة سيرفر)، يستاهل إعادة محاولة
+                if res.status_code == 429 or res.status_code >= 500:
+                    human_delay(6 * attempt, 10 * attempt)
+                    continue
+                return None, None, last_err
 
-        # استنى شوية بعد اللوجين
-        human_delay(2, 3)
+            # استنى شوية بعد اللوجين
+            human_delay(2, 3)
 
-        csrf_token = res.json().get("token", "") or res.headers.get("x-csrf-token", "")
+            csrf_token = res.json().get("token", "") or res.headers.get("x-csrf-token", "")
 
-        return session, csrf_token, None
+            return session, csrf_token, None
 
-    except Exception as e:
-        return None, None, str(e)
+        except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            # أخطاء اتصال/SSL مؤقتة (الموقع بيقفل الكونكشن فجأة) - نعيد المحاولة
+            last_err = str(e)
+            if attempt < max_retries:
+                human_delay(6 * attempt, 10 * attempt)
+                continue
+        except Exception as e:
+            return None, None, str(e)
+
+    # خلصت كل المحاولات ولسه فاشل
+    return None, None, last_err
 
 
 def api_logout(session):
