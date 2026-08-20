@@ -1,14 +1,24 @@
 """
 auto_update.py
-سكريبت مستقل (بره Streamlit) بيشتغل من GitHub Actions على جدول زمني ثابت.
-بيدور على المكاتب اللي فعّلت "تحديث تلقائي"، ولو حان وقت تحديثها (حسب عدد
-الساعات اللي اختاروها)، بيجيب آخر ملف محفوظ ليهم (Google Sheet مربوط أو
-آخر نسخة على Drive) وبيحدّث حالات الطلاب فيه، ثم يحفظ النتائج، وبيبعت
-إيميل للمكتب (على نفس إيميل التسجيل) بس لو في طالب اتغيرت حالته فعليًا.
+سكريبت مستقل (بره Streamlit) بيشتغل من GitHub Actions على جدول زمني.
+مهمته:
+1. لكل مكتب فعّل "تحديث تلقائي"، لو موعد التحديث بتاعه (حسب الفترة اللي
+   اختارها: 6/12/24 ساعة) قرّب بـ 10 دقايق ولسه الـ Worker المحلي مش شغال،
+   يبعت إيميل تذكير للمطوّرة عشان تفتح الـ Worker لو عايزة التحديث يمشي
+   عن طريقه (أأمن ضد الحظر) بدل الـ Cloud.
+2. لو موعد التحديث جه فعلاً:
+   - لو الـ Worker شغال → يفوّض المهمة ليه (نفس آلية app.py) ويستنى يخلص.
+   - لو مش شغال → يعمل التحديث بنفسه زي المعتاد (الطريقة الأصلية، Cloud).
+3. بيحدّث بس عمود "حالة الطلب الجديدة" في شيت المكتب المربوط (خلية خلية،
+   بدون مسح أو إعادة كتابة أي حاجة تانية في الشيت وبدون تغيير ترتيب الصفوف).
+4. بيمر على *كل* الطلاب المطلوبين في كل دورة (مفيش تقسيم لدفعات عبر أيام)،
+   بترتيب معالجة بيتشافل كل دورة (في الميموري بس)، ما عدا الطلاب اللي
+   وصلوا لحالة نهائية (زي "قبول نهائي") فبيتم استبعادهم.
+5. بيبعت إيميل للمكتب (لو حصل تغيير فعلي في حالة أي طالب) وبيحدّث "آخر
+   تحديث تلقائي" بعد ما الدورة الكاملة تخلص.
 
-الفرق الأساسي عن app.py: الملف ده مالوش أي تبعية على Streamlit (لأنه بيشتغل
-من غير أي حد فاتح الموقع)، وبياخد بيانات الاعتماد (service account + إيميل
-الإرسال) من متغيرات بيئة بدل st.secrets.
+الفرق عن app.py: الملف ده مالوش أي تبعية على Streamlit، وبياخد بيانات
+الاعتماد من متغيرات بيئة بدل st.secrets.
 """
 
 import os
@@ -38,6 +48,40 @@ HEADERS_BASE = {
     "content-type": "application/json",
 }
 
+# الحالات اللي لو الطالب وصلها، ما بنعيدش فحصه
+FINAL_STATUSES = {
+    "مقبول نهائي",
+    "تم الرفض",
+    "مرفوض نهائيًا",
+    "مرفوض نهائيا",
+}
+
+WORKER_ONLINE_THRESHOLD_SECONDS = 150  # نفس القيمة المستخدمة في app.py
+REMINDER_WINDOW_MINUTES = 10           # نبعت تذكير لو الموعد هيجي خلال كام دقيقة
+JOB_MAX_WAIT_SECONDS = 60 * 90         # أقصى وقت ننتظر فيه الـ Worker يخلص المهمة
+
+API_RETRY_MAX = 5
+API_RETRY_BASE_WAIT = 20
+
+
+# ==================== Retry wrapper ====================
+
+def with_retry(fn, *args, **kwargs):
+    last_err = None
+    for attempt in range(1, API_RETRY_MAX + 1):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            last_err = e
+            msg = str(e)
+            if "429" in msg or "Quota exceeded" in msg or "RESOURCE_EXHAUSTED" in msg:
+                wait = API_RETRY_BASE_WAIT * attempt
+                print(f"⚠️ Quota exceeded (محاولة {attempt}/{API_RETRY_MAX}) — استنى {wait} ثانية...")
+                time.sleep(wait)
+                continue
+            raise
+    raise last_err
+
 
 # ==================== Credentials ====================
 
@@ -64,88 +108,22 @@ def human_delay(min_sec=2, max_sec=5):
 
 
 def api_login(email, password, max_retries=3):
-    last_err = None
-
-    for attempt in range(1, max_retries + 1):
+    try:
         session = requests.Session()
         session.headers.update(HEADERS_BASE)
-
-        try:
-            human_delay(3, 6)
-
-            res = session.post(
-                f"{BASE_URL}/student/login",
-                json={
-                    "email": email,
-                    "password": password
-                },
-                timeout=(10, 30),
-            )
-
-            if res.status_code in [200, 201]:
-                human_delay(2, 4)
-
-                csrf_token = (
-                    res.json().get("token", "")
-                    or res.headers.get("x-csrf-token", "")
-                )
-
-                return session, csrf_token, None
-
-            last_err = f"فشل اللوجين - كود: {res.status_code}"
-
-            # نعيد المحاولة فقط لو المشكلة مؤقتة
-            if res.status_code == 429 or res.status_code >= 500:
-                if attempt < max_retries:
-                    wait = min(60, 5 * (2 ** (attempt - 1)))
-                    wait += random.uniform(0, 3)
-
-                    print(
-                        f"Login مؤقتًا فشل ({res.status_code}) "
-                        f"- محاولة {attempt}/{max_retries}, "
-                        f"انتظار {wait:.1f} ثانية"
-                    )
-
-                    time.sleep(wait)
-                    continue
-
-            return None, None, last_err
-
-        except (
-            requests.exceptions.SSLError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-        ) as e:
-
-            last_err = str(e)
-
-            try:
-                session.close()
-            except Exception:
-                pass
-
-            if attempt < max_retries:
-                wait = min(60, 5 * (2 ** (attempt - 1)))
-                wait += random.uniform(0, 3)
-
-                print(
-                    f"خطأ اتصال مؤقت: {type(e).__name__} "
-                    f"- محاولة {attempt}/{max_retries}, "
-                    f"إعادة المحاولة بعد {wait:.1f} ثانية"
-                )
-
-                time.sleep(wait)
-                continue
-
-        except Exception as e:
-            try:
-                session.close()
-            except Exception:
-                pass
-
-            return None, None, str(e)
-
-    return None, None, last_err or "فشل تسجيل الدخول بعد عدة محاولات"
+        human_delay(2, 4)
+        res = session.post(
+            f"{BASE_URL}/student/login",
+            json={"email": email, "password": password},
+            timeout=30,
+        )
+        if res.status_code not in [200, 201]:
+            return None, None, f"فشل اللوجين - كود: {res.status_code}"
+        human_delay(2, 3)
+        csrf_token = res.json().get("token", "") or res.headers.get("x-csrf-token", "")
+        return session, csrf_token, None
+    except Exception as e:
+        return None, None, str(e)
 
 
 def api_logout(session):
@@ -207,14 +185,10 @@ def find_excel_columns(ws):
         if any("يميل" in v or "mail" in v.lower() for v in row_values):
             header_row_num = row_idx
             header_len = len(row_values)
-
-            # أولوية: عمود اسمه "حالة الطلب الجديدة" تحديدًا - ده العمود اللي هنكتب فيه التحديث،
-            # عشان ميتلخبطش مع أي عمود "حالة الطلب" أصلي موجود أصلاً في ملف المكتب
             for i, cell in enumerate(row_values):
                 if "حالة" in cell and "الجديدة" in cell:
                     cols["status"] = i
                     break
-
             for i, cell in enumerate(row_values):
                 cell_lower = cell.lower()
                 if any(k in cell for k in ["اسم", "الإسم", "الاسم"]) or "name" in cell_lower:
@@ -230,13 +204,10 @@ def find_excel_columns(ws):
         raise Exception("مش لاقي عمود الإيميل!")
     if cols["password"] is None:
         raise Exception("مش لاقي عمود الباسورد!")
-
-    # لو عمود "حالة الطلب الجديدة" مش موجود أصلاً، نضيفه تلقائيًا في آخر الشيت
     if cols["status"] is None:
         new_col_index = header_len
         ws.cell(row=header_row_num, column=new_col_index + 1, value="حالة الطلب الجديدة")
         cols["status"] = new_col_index
-
     return cols, header_row_num
 
 
@@ -247,14 +218,12 @@ def extract_sheet_id(link):
 
 
 def extract_gid(link):
-    """بيستخرج رقم الـ gid (بيحدد التبويب بالظبط جوه الملف) من اللينك لو موجود"""
     import re
     match = re.search(r"[?#&]gid=(\d+)", link)
     return int(match.group(1)) if match else None
 
 
 def get_target_worksheet(spreadsheet, link):
-    """بيرجع التبويب المطابق بالظبط للينك المحفوظ (حسب gid)، أو أول تبويب لو مفيش gid"""
     gid = extract_gid(link)
     if gid is not None:
         try:
@@ -266,18 +235,98 @@ def get_target_worksheet(spreadsheet, link):
     return spreadsheet.sheet1
 
 
+# ==================== Worker coordination (heartbeat / jobs) ====================
+
+def get_heartbeat_sheet(client):
+    spreadsheet = with_retry(client.open_by_key, SHEET_ID)
+    try:
+        return with_retry(spreadsheet.worksheet, "worker_heartbeat")
+    except Exception:
+        return None
+
+
+def is_worker_online(client):
+    sheet = get_heartbeat_sheet(client)
+    if not sheet:
+        return False
+    try:
+        last_beat_str = with_retry(sheet.cell, 1, 2).value
+        if not last_beat_str:
+            return False
+        last_beat = datetime.strptime(last_beat_str, "%Y-%m-%d %H:%M:%S")
+        return (datetime.now() - last_beat).total_seconds() <= WORKER_ONLINE_THRESHOLD_SECONDS
+    except Exception:
+        return False
+
+
+def get_jobs_sheet(client):
+    spreadsheet = with_retry(client.open_by_key, SHEET_ID)
+    try:
+        return with_retry(spreadsheet.worksheet, "jobs")
+    except Exception:
+        sheet = with_retry(spreadsheet.add_worksheet, "jobs", 500, 9)
+        with_retry(sheet.append_row, ["job_id", "اسم المكتب", "نوع المصدر", "مرجع المصدر",
+                                       "اسم الملف", "الحالة", "تاريخ الإنشاء", "final_drive_file_id", "خطأ"])
+        return sheet
+
+
+def create_job(client, office, source_type, source_ref, filename):
+    sheet = get_jobs_sheet(client)
+    job_id = f"{office}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{random.randint(1000,9999)}"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with_retry(sheet.append_row, [job_id, office, source_type, source_ref, filename, "pending", now, "", ""])
+    return job_id
+
+
+def get_job(client, job_id):
+    sheet = get_jobs_sheet(client)
+    records = with_retry(sheet.get_all_records)
+    for r in records:
+        if str(r.get("job_id", "")) == job_id:
+            return r
+    return None
+
+
+def find_latest_drive_file_id(office):
+    """بيدوّر على آخر ملف محفوظ للمكتب على Drive (نفس منطق get_latest_file_from_drive
+    في app.py) وبيرجع الـ file_id بتاعه بس، عشان نبعته كمرجع للـ Worker."""
+    try:
+        from googleapiclient.discovery import build
+
+        creds = get_creds()
+        service = build("drive", "v3", credentials=creds)
+        safe_office = str(office).replace("\\", "\\\\").replace("'", "\\'")
+        results = (
+            service.files()
+            .list(
+                q=f"'{DRIVE_FOLDER_ID}' in parents and name contains '{safe_office}' and trashed=false",
+                orderBy="createdTime desc",
+                pageSize=1,
+                fields="files(id, name, createdTime)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute()
+        )
+        files = results.get("files", [])
+        if not files:
+            return None
+        return files[0]["id"]
+    except Exception as e:
+        print(f"تعذر البحث عن آخر ملف Drive للمكتب {office}: {e}")
+        return None
+
+
 # ==================== Data source (Google Sheet المربوط أو آخر نسخة Drive) ====================
 
 def get_office_source_workbook(client, office, gsheet_link):
-    """بيرجع (workbook, source_type, source_link) — source_type: 'gsheet' أو 'drive' أو None.
-    لو gsheet، بيرجع اللينك الكامل (مش الـ ID بس) عشان write_back_to_gsheet يقدر يحدد نفس التبويب بالظبط."""
     if gsheet_link:
         sid = extract_sheet_id(gsheet_link)
         if sid:
             try:
-                spreadsheet = client.open_by_key(sid)
+                spreadsheet = with_retry(client.open_by_key, sid)
                 ws = get_target_worksheet(spreadsheet, gsheet_link)
-                data = ws.get_all_values()
+                data = with_retry(ws.get_all_values)
                 if data:
                     wb = openpyxl.Workbook()
                     wsheet = wb.active
@@ -287,7 +336,6 @@ def get_office_source_workbook(client, office, gsheet_link):
             except Exception as e:
                 print(f"تعذر قراءة الشيت المربوط للمكتب {office}: {e}")
 
-    # لو مفيش شيت مربوط أو فشلت قراءته، نرجع لآخر نسخة محفوظة على Drive
     try:
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaIoBaseDownload
@@ -345,32 +393,44 @@ def upload_backup_to_drive(file_bytes, filename, office):
         print(f"فشل رفع نسخة احتياطية للمكتب {office}: {e}")
 
 
-def write_back_to_gsheet(client, link, wb):
-    """بيكتب النتائج تاني في نفس التبويب المحدد في اللينك (حسب gid)"""
+def ensure_status_header_in_gsheet(client, link, header_row_num, status_col_index, header_name="حالة الطلب الجديدة"):
     try:
         sheet_id = extract_sheet_id(link)
         if not sheet_id:
-            print("فشل تحديث Google Sheet: الرابط غير صحيح")
             return
-        spreadsheet = client.open_by_key(sheet_id)
+        spreadsheet = with_retry(client.open_by_key, sheet_id)
         ws = get_target_worksheet(spreadsheet, link)
-        wsheet = wb.active
-        data = [[str(c) if c is not None else "" for c in row] for row in wsheet.iter_rows(values_only=True)]
-        ws.clear()
-        ws.update(data)
+        col_num = status_col_index + 1
+        current = with_retry(ws.cell, header_row_num, col_num).value
+        if str(current or "").strip() != header_name:
+            with_retry(ws.update_cell, header_row_num, col_num, header_name)
     except Exception as e:
-        print(f"فشل تحديث Google Sheet: {e}")
+        print(f"تعذر ضمان هيدر عمود الحالة: {e}")
+
+
+def update_status_cell_in_gsheet(client, link, row_num, status_col_index, value):
+    """بتكتب خلية واحدة بس في شيت المكتب — بدون مسح أو إعادة كتابة أي حاجة تانية"""
+    try:
+        sheet_id = extract_sheet_id(link)
+        if not sheet_id:
+            return False
+        spreadsheet = with_retry(client.open_by_key, sheet_id)
+        ws = get_target_worksheet(spreadsheet, link)
+        with_retry(ws.update_cell, row_num, status_col_index + 1, value)
+        return True
+    except Exception as e:
+        print(f"فشل تحديث خلية الحالة: {e}")
+        return False
 
 
 def get_previous_results(client, office):
-    """بيرجع dict {اسم الطالب: الحالة} بناءً على آخر نتائج محفوظة للمكتب قبل التحديث الحالي"""
     try:
-        spreadsheet = client.open_by_key(SHEET_ID)
+        spreadsheet = with_retry(client.open_by_key, SHEET_ID)
         try:
-            sheet = spreadsheet.worksheet("results")
+            sheet = with_retry(spreadsheet.worksheet, "results")
         except Exception:
             return {}
-        all_values = sheet.get_all_values()
+        all_values = with_retry(sheet.get_all_values)
         if len(all_values) <= 1:
             return {}
         target = str(office).strip()
@@ -387,7 +447,6 @@ def get_previous_results(client, office):
 
 
 def compute_changes(previous_results, new_results):
-    """بيقارن الحالات القديمة بالجديدة ويرجع بس الطلاب اللي حالتهم اتغيرت (أو طلاب جداد)"""
     changes = []
     for r in new_results:
         name = str(r.get("name", "")).strip()
@@ -403,7 +462,6 @@ def compute_changes(previous_results, new_results):
 
 
 def build_email_message(office, changes):
-    """بيبني نص الإيميل: قايمة مرقّمة بالاسم والحالة الجديدة بس (من غير الحالة القديمة)"""
     lines = [f"تحديث حالات الطلاب - {office}", ""]
     shown = changes[:200]
     for idx, c in enumerate(shown, start=1):
@@ -417,7 +475,6 @@ def build_email_message(office, changes):
 
 
 def send_email_notification(to_email, subject, body):
-    """بيبعت إيميل عن طريق Gmail SMTP - مجاني بالكامل، محتاج بس إيميل Gmail وApp Password"""
     import smtplib
     from email.mime.text import MIMEText
 
@@ -428,7 +485,7 @@ def send_email_notification(to_email, subject, body):
         print("إعدادات الإيميل مش مكتملة على GitHub Secrets - تم تخطي الإرسال.")
         return
     if not to_email:
-        print("مفيش إيميل محفوظ للمكتب - تم تخطي الإرسال.")
+        print("مفيش إيميل مستقبل - تم تخطي الإرسال.")
         return
 
     try:
@@ -440,37 +497,52 @@ def send_email_notification(to_email, subject, body):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, [to_email], msg.as_string())
-        print(f"تم إرسال إشعار بالإيميل إلى {to_email}")
+        print(f"تم إرسال إيميل إلى {to_email}")
     except Exception as e:
         print(f"خطأ في إرسال الإيميل: {e}")
 
 
 def save_results_to_sheet(client, office, results):
     try:
-        spreadsheet = client.open_by_key(SHEET_ID)
+        spreadsheet = with_retry(client.open_by_key, SHEET_ID)
         try:
-            sheet = spreadsheet.worksheet("results")
+            sheet = with_retry(spreadsheet.worksheet, "results")
         except Exception:
-            sheet = spreadsheet.add_worksheet("results", 2000, 4)
-            sheet.append_row(["اسم المكتب", "اسم الطالب", "الحالة", "تاريخ التحديث"])
+            sheet = with_retry(spreadsheet.add_worksheet, "results", 2000, 4)
+            with_retry(sheet.append_row, ["اسم المكتب", "اسم الطالب", "الحالة", "تاريخ التحديث"])
 
-        all_values = sheet.get_all_values()
+        all_values = with_retry(sheet.get_all_values)
         headers = all_values[0] if all_values else ["اسم المكتب", "اسم الطالب", "الحالة", "تاريخ التحديث"]
         target = str(office).strip()
         kept_rows = [row for row in all_values[1:] if row and str(row[0]).strip() != target]
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         new_rows = [[target, r.get("name", ""), r.get("status", ""), now] for r in results]
         final_data = [headers] + kept_rows + new_rows
-        sheet.clear()
-        sheet.update(final_data)
+        with_retry(sheet.clear)
+        with_retry(sheet.update, final_data)
     except Exception as e:
         print(f"فشل حفظ نتائج المكتب {office}: {e}")
 
 
-# ==================== Core logic ====================
+def log_to_sheet(client, office, action, filename=""):
+    try:
+        sheet = with_retry(client.open_by_key, SHEET_ID).sheet1
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        first_cell = with_retry(sheet.cell, 1, 1).value
+        if sheet.row_count == 0 or first_cell != "التاريخ":
+            with_retry(sheet.insert_row, ["التاريخ", "اسم المكتب", "العملية", "اسم الملف"], 1)
+        with_retry(sheet.append_row, [now, office, action, filename])
+    except Exception as e:
+        print(f"خطأ في التسجيل: {e}")
 
-def process_office(client, office, gsheet_link, office_email):
-    print(f"--- بدء تحديث تلقائي للمكتب: {office} ---")
+
+# ==================== المسار المباشر (Cloud) — لما الـ Worker مش شغال ====================
+
+def process_office_direct(client, office, gsheet_link, office_email):
+    """بتعمل التحديث بنفسها (زي ما كانت الطريقة الأصلية) — بتمر على *كل*
+    الطلاب المطلوبين في الدورة دي، بترتيب معالجة عشوائي (شافل)، وبتكتب
+    خلية عمود 'حالة الطلب الجديدة' بس في شيت المكتب لكل طالب."""
+    print(f"--- تحديث مباشر (Cloud) للمكتب: {office} ---")
     wb, source_type, source_link = get_office_source_workbook(client, office, gsheet_link)
     if wb is None:
         print(f"لا يوجد ملف محفوظ للمكتب {office}، تم التخطي.")
@@ -483,68 +555,194 @@ def process_office(client, office, gsheet_link, office_email):
         print(f"خطأ في قراءة أعمدة ملف المكتب {office}: {e}")
         return
 
-    # هات النتائج القديمة قبل ما نبدأ نكتب فوقها، عشان نقدر نقارن بعدين
     previous_results = get_previous_results(client, office)
 
-    rows_data = list(ws.iter_rows(min_row=header_row_num + 1, values_only=False))
-    valid_rows = [r for r in rows_data if r[cols["email"]].value and r[cols["password"]].value]
+    if source_type == "gsheet":
+        ensure_status_header_in_gsheet(client, source_link, header_row_num, cols["status"])
 
-    for row in valid_rows:
+    rows_data = list(ws.iter_rows(min_row=header_row_num + 1, values_only=False))
+    all_valid_rows = [r for r in rows_data if r[cols["email"]].value and r[cols["password"]].value]
+
+    pending_rows = []
+    for r in all_valid_rows:
+        name = str(r[cols["name"]].value or "").strip() if cols["name"] is not None else ""
+        if previous_results.get(name) in FINAL_STATUSES:
+            continue
+        pending_rows.append(r)
+
+    skipped_final = len(all_valid_rows) - len(pending_rows)
+    if skipped_final:
+        print(f"تم تخطي {skipped_final} طالب/ة وصلوا لحالة نهائية بالفعل.")
+
+    total = len(pending_rows)
+    if total == 0:
+        print(f"مفيش طلاب محتاجين تحديث للمكتب {office}.")
+        return
+
+    # شافل ترتيب المعالجة (اللوجين على الموقع الحكومي) بس — الصفوف في الشيت
+    # نفسها بتتكتب في مكانها الأصلي دايمًا بغض النظر عن ترتيب المعالجة
+    processing_order = pending_rows[:]
+    random.shuffle(processing_order)
+
+    processed_results = []
+    for row in processing_order:
         email = str(row[cols["email"]].value).strip()
         password = str(row[cols["password"]].value).strip()
+        name = row[cols["name"]].value if cols["name"] is not None else ""
+        display_name = name or email
+        row_num_in_sheet = row[cols["email"]].row
+
         session, csrf_token, err = api_login(email, password)
         if err or not session:
-            if cols["status"] is not None:
-                row[cols["status"]].value = "فشل تسجيل الدخول"
+            status_val = f"فشل تسجيل الدخول ({err})" if err else "فشل تسجيل الدخول"
         else:
-            _, status = get_status(session, csrf_token)
-            if cols["status"] is not None:
-                row[cols["status"]].value = status
+            _, status_val = get_status(session, csrf_token)
             api_logout(session)
-        human_delay(5, 10)
+
+        if cols["status"] is not None:
+            row[cols["status"]].value = status_val
+
+        processed_results.append({"name": str(display_name), "status": str(status_val)})
+
+        if source_type == "gsheet":
+            update_status_cell_in_gsheet(client, source_link, row_num_in_sheet, cols["status"], status_val)
+
+        human_delay(8, 15)
 
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
-
-    if source_type == "gsheet" and source_link:
-        write_back_to_gsheet(client, source_link, wb)
-
     upload_backup_to_drive(out.getvalue(), "auto_update.xlsx", office)
 
-    results = [
-        {
-            "name": str(r[cols["name"]].value if cols["name"] is not None else ""),
-            "status": str(r[cols["status"]].value if cols["status"] is not None else ""),
-        }
-        for r in valid_rows
+    # لازم نحافظ على نتائج الطلاب اللي كانوا في حالة نهائية أصلاً (اتستبعدوا من
+    # المعالجة دي) عشان ما نفقدش سجلهم من شيت النتائج الداخلي
+    skipped_results = [
+        {"name": n, "status": s} for n, s in previous_results.items() if s in FINAL_STATUSES
     ]
-    save_results_to_sheet(client, office, results)
+    save_results_to_sheet(client, office, processed_results + skipped_results)
 
-    # لو أول مرة نجمع نتائج للمكتب ده، منبعتش إشعار (كل الحالات هتبان "جديدة" وده هيغرق المكتب بإيميل ضخم أول تشغيل)
     if previous_results:
-        changes = compute_changes(previous_results, results)
+        changes = compute_changes(previous_results, processed_results)
         if changes:
             if office_email:
                 subject = f"تحديث حالات الطلاب - {office}"
                 body = build_email_message(office, changes)
                 send_email_notification(office_email, subject, body)
             else:
-                print(f"في {len(changes)} تغيير للمكتب {office}، بس مفيش إيميل محفوظ - تم تخطي الإرسال.")
+                print(f"في {len(changes)} تغيير للمكتب {office}، بس مفيش إيميل محفوظ.")
         else:
-            print(f"مفيش أي تغيير في حالات المكتب {office} - مفيش إشعار.")
+            print(f"مفيش أي تغيير في حالات المكتب {office}.")
     else:
         print(f"أول تحديث تلقائي للمكتب {office} - تم حفظ النتائج بدون إرسال إشعار.")
 
-    print(f"--- اكتمل تحديث المكتب: {office} ({len(valid_rows)} طالب) ---")
+    log_to_sheet(client, office, "اكتمل المعالجة التلقائية (Cloud)", "auto_update.xlsx")
+    print(f"--- اكتمل تحديث المكتب: {office} ({total} طالب) ---")
 
+
+# ==================== المسار المفوّض (Worker) — لما الـ Worker شغال ====================
+
+def process_office_via_worker(client, office, gsheet_link, office_email):
+    """بتنشئ Job للـ Worker المحلي وتستنى يخلصه، وبعدين تبعت إيميل التغييرات
+    وتحدّث 'آخر تحديث تلقائي' زي ما المسار المباشر بيعمل بالظبط."""
+    print(f"--- تحديث عن طريق Worker محلي للمكتب: {office} ---")
+    previous_results = get_previous_results(client, office)
+
+    if gsheet_link:
+        job_id = create_job(client, office, "gsheet", gsheet_link, "google_sheet")
+    else:
+        file_id = find_latest_drive_file_id(office)
+        if not file_id:
+            print(f"مفيش ملف محفوظ للمكتب {office} على Drive، تم التخطي.")
+            return False
+        job_id = create_job(client, office, "drive", file_id, "auto_update.xlsx")
+
+    if not job_id:
+        print(f"مقدرتش أنشئ Job للمكتب {office}.")
+        return False
+
+    waited = 0
+    poll_interval = 10
+    job = None
+    while waited < JOB_MAX_WAIT_SECONDS:
+        job = get_job(client, job_id)
+        status = (job or {}).get("الحالة", "")
+        if status in ("done", "failed"):
+            break
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+    if not job or job.get("الحالة") != "done":
+        print(f"فشل أو انتهت مهلة انتظار Worker للمكتب {office}: {(job or {}).get('خطأ', 'مهلة انتظار')}")
+        return False
+
+    # النتائج والإيميلات اتحفظت/اتبعتت بالفعل من جوه worker.py نفسه (نفس آلية
+    # save_results_to_sheet)، فبس بنبعت إيميل التغييرات هنا لو عايزين إشعار
+    # منفصل، وبنعتبر الدورة خلصت
+    new_results = get_previous_results(client, office)  # بعد ما الـ Worker حدّث النتائج
+    changes = compute_changes(previous_results, [{"name": n, "status": s} for n, s in new_results.items()])
+    if changes and office_email:
+        subject = f"تحديث حالات الطلاب - {office}"
+        body = build_email_message(office, changes)
+        send_email_notification(office_email, subject, body)
+
+    print(f"--- اكتمل تحديث المكتب عن طريق Worker: {office} ---")
+    return True
+
+
+# ==================== إيميل التذكير قبل الموعد بـ 10 دقايق ====================
+
+def send_worker_reminder(office, minutes_left):
+    """بيبعت إيميل تذكير للمطوّرة إن موعد تحديث مكتب معيّن هيجي قريب، ولسه
+    الـ Worker المحلي مش شغال — عشان تفتحه لو عايزة التحديث يمشي عن طريقه."""
+    developer_email = os.environ.get("DEVELOPER_EMAIL")
+    if not developer_email:
+        print("مفيش DEVELOPER_EMAIL محفوظ - تم تخطي إيميل التذكير.")
+        return
+    subject = f"⏰ تذكير: موعد تحديث المكتب '{office}' قريب"
+    body = (
+        f"موعد التحديث التلقائي للمكتب '{office}' هيجي خلال حوالي {minutes_left} دقيقة.\n"
+        f"لو عايزة التحديث ده يمشي عن طريق الـ Worker المحلي (أأمن ضد الحظر)، "
+        f"افتحي worker.py دلوقتي قبل ما الموعد يجي.\n"
+        f"لو ما فتحتيهوش، التحديث هيمشي عادي عن طريق الـ Cloud زي المعتاد."
+    )
+    send_email_notification(developer_email, subject, body)
+
+
+def maybe_send_reminder(accounts_sheet, headers, row_num, office, due_time, client):
+    """بتبعت تذكير مرة واحدة بس لكل دورة قبل الموعد بـ REMINDER_WINDOW_MINUTES،
+    وبتسجل إنها بعتت التذكير عشان ما تكررهوش."""
+    now = datetime.now()
+    minutes_left = (due_time - now).total_seconds() / 60
+    if not (0 <= minutes_left <= REMINDER_WINDOW_MINUTES):
+        return
+
+    reminder_col_name = "آخر تذكير Worker"
+    if reminder_col_name not in headers:
+        col_num = len(headers) + 1
+        with_retry(accounts_sheet.update_cell, 1, col_num, reminder_col_name)
+        headers.append(reminder_col_name)
+    col_num = headers.index(reminder_col_name) + 1
+
+    last_reminder_str = with_retry(accounts_sheet.cell, row_num, col_num).value
+    due_key = due_time.strftime("%Y-%m-%d %H:%M")
+    if last_reminder_str == due_key:
+        return  # اتبعت التذكير ده قبل كده لنفس الموعد
+
+    if is_worker_online(client):
+        return  # الـ Worker شغال بالفعل، مفيش داعي تذكير
+
+    send_worker_reminder(office, round(minutes_left))
+    with_retry(accounts_sheet.update_cell, row_num, col_num, due_key)
+
+
+# ==================== Main ====================
 
 def main():
     client = get_gspread_client()
-    spreadsheet = client.open_by_key(SHEET_ID)
-    accounts_sheet = spreadsheet.worksheet("accounts")
-    records = accounts_sheet.get_all_records()
-    headers = accounts_sheet.row_values(1)
+    spreadsheet = with_retry(client.open_by_key, SHEET_ID)
+    accounts_sheet = with_retry(spreadsheet.worksheet, "accounts")
+    records = with_retry(accounts_sheet.get_all_records)
+    headers = with_retry(accounts_sheet.row_values, 1)
 
     now = datetime.now()
 
@@ -563,28 +761,42 @@ def main():
             interval = 12
 
         last_update_str = r.get("آخر تحديث تلقائي", "")
-        due = True
         if last_update_str:
             try:
                 last_update = datetime.strptime(last_update_str, "%Y-%m-%d %H:%M:%S")
-                due = now - last_update >= timedelta(hours=interval)
+                due_time = last_update + timedelta(hours=interval)
             except Exception:
-                due = True
+                due_time = now  # لو التاريخ اتلخبط، اعتبريه مستحق دلوقتي
+        else:
+            due_time = now  # أول مرة، مستحق فورًا
 
+        # ابعتي تذكير لو الموعد قرّب والـ Worker لسه مش شغال
+        maybe_send_reminder(accounts_sheet, headers, i, office, due_time, client)
+
+        due = now >= due_time
         if not due:
             print(f"المكتب {office}: لسه معملوش موعد التحديث (كل {interval} ساعة).")
             continue
 
         gsheet_link = r.get("لينك الشيت", "")
         office_email = str(r.get("الإيميل", "") or "").strip()
+
         try:
-            process_office(client, office, gsheet_link, office_email)
+            success = False
+            if is_worker_online(client):
+                success = process_office_via_worker(client, office, gsheet_link, office_email)
+                if not success:
+                    print(f"فشل التفويض للـ Worker للمكتب {office} — هنعمل التحديث مباشرة (Cloud) بدلاً منه.")
+                    process_office_direct(client, office, gsheet_link, office_email)
+            else:
+                process_office_direct(client, office, gsheet_link, office_email)
+
             if "آخر تحديث تلقائي" not in headers:
                 col_num = len(headers) + 1
-                accounts_sheet.update_cell(1, col_num, "آخر تحديث تلقائي")
-                headers = accounts_sheet.row_values(1)
+                with_retry(accounts_sheet.update_cell, 1, col_num, "آخر تحديث تلقائي")
+                headers = with_retry(accounts_sheet.row_values, 1)
             col_num = headers.index("آخر تحديث تلقائي") + 1
-            accounts_sheet.update_cell(i, col_num, now.strftime("%Y-%m-%d %H:%M:%S"))
+            with_retry(accounts_sheet.update_cell, i, col_num, now.strftime("%Y-%m-%d %H:%M:%S"))
         except Exception as e:
             print(f"خطأ أثناء تحديث المكتب {office}: {e}")
 
