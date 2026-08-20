@@ -33,4 +33,5 @@ jobs:
           GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           SENDER_APP_PASSWORD: ${{ secrets.SENDER_APP_PASSWORD }}
+          DEVELOPER_EMAIL: ${{ secrets.DEVELOPER_EMAIL }}
         run: python auto_update.py
