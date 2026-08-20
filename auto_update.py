@@ -56,9 +56,11 @@ FINAL_STATUSES = {
     "مرفوض نهائيا",
 }
 
-WORKER_ONLINE_THRESHOLD_SECONDS = 150  # نفس القيمة المستخدمة في app.py
 REMINDER_WINDOW_MINUTES = 10           # نبعت تذكير لو الموعد هيجي خلال كام دقيقة
 JOB_MAX_WAIT_SECONDS = 60 * 90         # أقصى وقت ننتظر فيه الـ Worker يخلص المهمة
+JOB_PICKUP_WAIT_SECONDS = 45           # أقصى وقت ننتظر فيه نشوف هل الـ Worker هياخد المهمة
+JOB_PICKUP_POLL_INTERVAL = 5
+WORKER_RECENT_ACTIVITY_MINUTES = 20    # لاستخدام إيميل التذكير بس (مش لقرار Worker/Cloud نفسه)
 
 API_RETRY_MAX = 5
 API_RETRY_BASE_WAIT = 20
@@ -235,29 +237,12 @@ def get_target_worksheet(spreadsheet, link):
     return spreadsheet.sheet1
 
 
-# ==================== Worker coordination (heartbeat / jobs) ====================
-
-def get_heartbeat_sheet(client):
-    spreadsheet = with_retry(client.open_by_key, SHEET_ID)
-    try:
-        return with_retry(spreadsheet.worksheet, "worker_heartbeat")
-    except Exception:
-        return None
-
-
-def is_worker_online(client):
-    sheet = get_heartbeat_sheet(client)
-    if not sheet:
-        return False
-    try:
-        last_beat_str = with_retry(sheet.cell, 1, 2).value
-        if not last_beat_str:
-            return False
-        last_beat = datetime.strptime(last_beat_str, "%Y-%m-%d %H:%M:%S")
-        return (datetime.now() - last_beat).total_seconds() <= WORKER_ONLINE_THRESHOLD_SECONDS
-    except Exception:
-        return False
-
+# ==================== Worker coordination (jobs - مفيش heartbeat خالص) ====================
+# بنعرف إن فيه Worker شغال أو لأ بطريقة واحدة بس: بننشئ مهمة (job) ونستنى لحد
+# JOB_PICKUP_WAIT_SECONDS نشوف هل حالتها اتحولت لـ "processing" - لو حصل، نبقى
+# متأكدين إن فيه Worker شغال ونكمل معاه؛ لو لأ، نلغي المهمة ونشتغل Cloud.
+# (is_worker_likely_online تحت دي بديل أخف بنستخدمه بس لإيميل التذكير قبل
+# الموعد بـ 10 دقايق، من غير ما ننشئ مهمة فعلية).
 
 def get_jobs_sheet(client):
     spreadsheet = with_retry(client.open_by_key, SHEET_ID)
@@ -285,6 +270,67 @@ def get_job(client, job_id):
         if str(r.get("job_id", "")) == job_id:
             return r
     return None
+
+
+def cancel_job(client, job_id):
+    """بيلغي مهمة لسه pending (محدش شافها) - بنستخدمها لما محدش من الـ Worker
+    ياخدها خلال مهلة الانتظار، عشان لو الـ Worker اتفتح متأخر ما يشتغلش على
+    مهمة إحنا أصلاً عملناها Cloud بدلاً منها."""
+    try:
+        sheet = get_jobs_sheet(client)
+        cell = with_retry(sheet.find, job_id)
+        if not cell:
+            return False
+        headers = with_retry(sheet.row_values, 1)
+        status_col = headers.index("الحالة") + 1
+        current_status = with_retry(sheet.cell, cell.row, status_col).value
+        if current_status == "pending":
+            with_retry(sheet.update_cell, cell.row, status_col, "cancelled")
+        return True
+    except Exception as e:
+        print(f"خطأ في cancel_job: {e}")
+        return False
+
+
+def wait_for_job_pickup(client, job_id):
+    """بيستنى لحد JOB_PICKUP_WAIT_SECONDS نشوف هل فيه Worker هياخد المهمة دي.
+    بيرجع (picked_up, last_job)."""
+    waited = 0
+    job = None
+    while waited < JOB_PICKUP_WAIT_SECONDS:
+        job = get_job(client, job_id)
+        status = (job or {}).get("الحالة", "")
+        if status in ("processing", "done", "failed"):
+            return True, job
+        time.sleep(JOB_PICKUP_POLL_INTERVAL)
+        waited += JOB_PICKUP_POLL_INTERVAL
+    return False, job
+
+
+def is_worker_likely_online(client):
+    """بديل بدون heartbeat: بندور في شيت jobs على أي مهمة (لأي مكتب) خرجت من
+    pending خلال آخر WORKER_RECENT_ACTIVITY_MINUTES دقيقة - ده أقرب إشارة
+    عندنا إن فيه Worker شغال بيسحب المهام، من غير ما ننشئ مهمة تجريبية أو
+    نضيف أي فحص/نبضة مستقلة. بنستخدمها بس لإيميل التذكير قبل الموعد."""
+    try:
+        sheet = get_jobs_sheet(client)
+        records = with_retry(sheet.get_all_records)
+        cutoff = datetime.now() - timedelta(minutes=WORKER_RECENT_ACTIVITY_MINUTES)
+        for r in reversed(records):
+            status = str(r.get("الحالة", ""))
+            if status not in ("processing", "done"):
+                continue
+            created_str = str(r.get("تاريخ الإنشاء", ""))
+            try:
+                created = datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                continue
+            if created >= cutoff:
+                return True
+        return False
+    except Exception as e:
+        print(f"خطأ في is_worker_likely_online: {e}")
+        return False
 
 
 def find_latest_drive_file_id(office):
@@ -642,9 +688,10 @@ def process_office_direct(client, office, gsheet_link, office_email):
 # ==================== المسار المفوّض (Worker) — لما الـ Worker شغال ====================
 
 def process_office_via_worker(client, office, gsheet_link, office_email):
-    """بتنشئ Job للـ Worker المحلي وتستنى يخلصه، وبعدين تبعت إيميل التغييرات
-    وتحدّث 'آخر تحديث تلقائي' زي ما المسار المباشر بيعمل بالظبط."""
-    print(f"--- تحديث عن طريق Worker محلي للمكتب: {office} ---")
+    """بتنشئ Job وتستنى الأول لحد JOB_PICKUP_WAIT_SECONDS تشوف هل فيه Worker
+    هياخدها. لو محدش أخدها، بترجع None (يعني: جربي المسار المباشر / Cloud).
+    لو اتاخدت، بتستنى تخلص زي المعتاد وترجع True/False حسب النتيجة."""
+    print(f"--- محاولة تحديث عن طريق Worker محلي للمكتب: {office} ---")
     previous_results = get_previous_results(client, office)
 
     if gsheet_link:
@@ -653,16 +700,22 @@ def process_office_via_worker(client, office, gsheet_link, office_email):
         file_id = find_latest_drive_file_id(office)
         if not file_id:
             print(f"مفيش ملف محفوظ للمكتب {office} على Drive، تم التخطي.")
-            return False
+            return None
         job_id = create_job(client, office, "drive", file_id, "auto_update.xlsx")
 
     if not job_id:
         print(f"مقدرتش أنشئ Job للمكتب {office}.")
-        return False
+        return None
 
+    picked_up, job = wait_for_job_pickup(client, job_id)
+    if not picked_up:
+        print(f"مفيش Worker استلم مهمة المكتب {office} خلال {JOB_PICKUP_WAIT_SECONDS} ثانية — هنشتغل Cloud بدلاً منه.")
+        cancel_job(client, job_id)
+        return None
+
+    print(f"فيه Worker استلم مهمة المكتب {office} — بنستنى يخلص...")
     waited = 0
     poll_interval = 10
-    job = None
     while waited < JOB_MAX_WAIT_SECONDS:
         job = get_job(client, job_id)
         status = (job or {}).get("الحالة", "")
@@ -728,8 +781,8 @@ def maybe_send_reminder(accounts_sheet, headers, row_num, office, due_time, clie
     if last_reminder_str == due_key:
         return  # اتبعت التذكير ده قبل كده لنفس الموعد
 
-    if is_worker_online(client):
-        return  # الـ Worker شغال بالفعل، مفيش داعي تذكير
+    if is_worker_likely_online(client):
+        return  # الـ Worker شغال بالفعل على الأرجح، مفيش داعي تذكير
 
     send_worker_reminder(office, round(minutes_left))
     with_retry(accounts_sheet.update_cell, row_num, col_num, due_key)
@@ -782,13 +835,14 @@ def main():
         office_email = str(r.get("الإيميل", "") or "").strip()
 
         try:
-            success = False
-            if is_worker_online(client):
-                success = process_office_via_worker(client, office, gsheet_link, office_email)
-                if not success:
-                    print(f"فشل التفويض للـ Worker للمكتب {office} — هنعمل التحديث مباشرة (Cloud) بدلاً منه.")
-                    process_office_direct(client, office, gsheet_link, office_email)
-            else:
+            # بننادي process_office_via_worker على طول من غير فحص Worker مسبق -
+            # هي نفسها بتنشئ المهمة وتستنى 45 ثانية تشوف هل حد هياخدها. لو
+            # رجّعت None يبقى محدش أخدها، فنشتغل Cloud على طول.
+            result = process_office_via_worker(client, office, gsheet_link, office_email)
+            if result is None:
+                process_office_direct(client, office, gsheet_link, office_email)
+            elif result is False:
+                print(f"فشل التحديث عن طريق الـ Worker للمكتب {office} — هنعمل التحديث مباشرة (Cloud) بدلاً منه.")
                 process_office_direct(client, office, gsheet_link, office_email)
 
             if "آخر تحديث تلقائي" not in headers:
