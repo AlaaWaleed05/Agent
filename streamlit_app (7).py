@@ -24,20 +24,83 @@ ADMIN_PASSWORD = "admin123"  # ← باسورد المسؤول
 SHEET_ID = "1BlFdtY-7ZIF1y2GwVosxlG9r7nK5xqYeW6yiIjPI_9U"
 DRIVE_FOLDER_ID = "12L_qSHBnW4-tfQZRteynInWNBAML016f"
 
+# ==================== Google Sheets client (كاش + retry لتفادي 429) ====================
+# بنكاش الاتصال وشيت النظام الأساسي بدل ما نعمل authorize + open_by_key من جديد
+# مع كل نداء - ده اللي كان بيستهلك quota بسرعة (خصوصًا في لوب متابعة تقدّم
+# الـ Worker اللي بيسأل كل كذا ثانية).
+
+@st.cache_resource(show_spinner=False)
+def _get_gspread_client():
+    creds_dict = st.secrets["gcp_service_account"]
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive"]
+    )
+    return gspread.authorize(creds)
+
+
+@st.cache_resource(show_spinner=False)
+def _get_main_spreadsheet():
+    return _get_gspread_client().open_by_key(SHEET_ID)
+
+
+def with_retry(fn, *args, max_retries=6, **kwargs):
+    """بينفذ أي نداء لـ gspread، ولو حصل 429 (quota exceeded) بيستنى وبيعيد المحاولة
+    بدل ما يوقف الصفحة بخطأ فورًا."""
+    delay = 5
+    for attempt in range(1, max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            msg = str(e)
+            if "429" in msg or "Quota exceeded" in msg or "RESOURCE_EXHAUSTED" in msg:
+                if attempt == max_retries:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
+                continue
+            raise
+
+
+_worksheet_cache = {}
+
+
+def _get_cached_worksheet(name, create_fn):
+    if name in _worksheet_cache:
+        return _worksheet_cache[name]
+    spreadsheet = _get_main_spreadsheet()
+    try:
+        ws = with_retry(spreadsheet.worksheet, name)
+    except Exception:
+        ws = create_fn(spreadsheet)
+    _worksheet_cache[name] = ws
+    return ws
+
+
+_office_ws_cache = {}
+
+
+def _get_office_worksheet(link):
+    """بنكاش تبويب شيت المكتب بعد أول فتح ليه في نفس الجلسة، بدل ما نفتحه من
+    جديد كل مرة."""
+    sheet_id = extract_sheet_id(link)
+    if not sheet_id:
+        return None
+    if link in _office_ws_cache:
+        return _office_ws_cache[link]
+    spreadsheet = with_retry(_get_gspread_client().open_by_key, sheet_id)
+    ws = get_target_worksheet(spreadsheet, link)
+    _office_ws_cache[link] = ws
+    return ws
+
+
 # ==================== Google Sheets Logging ====================
 
 def get_sheet():
     """اتصل بـ Google Sheets"""
     try:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=["https://spreadsheets.google.com/feeds",
-                    "https://www.googleapis.com/auth/drive"]
-        )
-        client = gspread.authorize(creds)
-        sheet = client.open_by_key(SHEET_ID).sheet1
-        return sheet
+        return _get_main_spreadsheet().sheet1
     except Exception as e:
         print(f"خطأ في Google Sheets: {e}")
         return None
@@ -49,29 +112,20 @@ def log_to_sheet(office, action, filename=""):
         if sheet:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             # تأكد إن الهيدر موجود
-        if sheet.row_count == 0 or sheet.cell(1,1).value != "التاريخ":
-            sheet.insert_row(["التاريخ", "اسم المكتب", "العملية", "اسم الملف"], 1)
-        sheet.append_row([now, office, action, filename])
+        if sheet.row_count == 0 or with_retry(sheet.cell, 1, 1).value != "التاريخ":
+            with_retry(sheet.insert_row, ["التاريخ", "اسم المكتب", "العملية", "اسم الملف"], 1)
+        with_retry(sheet.append_row, [now, office, action, filename])
     except Exception as e:
         print(f"خطأ في التسجيل: {e}")
 
 def get_accounts_sheet():
     """جيب شيت الحسابات"""
     try:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=["https://spreadsheets.google.com/feeds",
-                    "https://www.googleapis.com/auth/drive"]
-        )
-        client = gspread.authorize(creds)
-        spreadsheet = client.open_by_key(SHEET_ID)
-        try:
-            sheet = spreadsheet.worksheet("accounts")
-        except:
+        def create(spreadsheet):
             sheet = spreadsheet.add_worksheet("accounts", 1000, 5)
             sheet.append_row(["اسم المكتب", "الإيميل", "الباسورد", "الحالة", "تاريخ التسجيل"])
-        return sheet
+            return sheet
+        return _get_cached_worksheet("accounts", create)
     except Exception as e:
         return None
 
@@ -241,12 +295,12 @@ def save_gsheet_link(office, link):
         if not sheet:
             return False, "مش قادر أوصل لشيت الحسابات (accounts sheet) — تأكدي من صلاحيات الـ service account."
 
-        headers = sheet.row_values(1)
+        headers = with_retry(sheet.row_values, 1)
         target = str(office).strip()
 
         # بندور صف صف على عمود "اسم المكتب" (العمود الأول) بدل get_all_records
         # عشان نتجنب مشاكل الهيدرز الفاضية/المكررة
-        office_col_values = sheet.col_values(1)
+        office_col_values = with_retry(sheet.col_values, 1)
         row_num = None
         for i, val in enumerate(office_col_values[1:], start=2):  # صف 1 = هيدر
             if str(val).strip() == target:
@@ -262,11 +316,11 @@ def save_gsheet_link(office, link):
             col_num = len(headers) + 1
             if col_num > sheet.col_count:
                 sheet.add_cols(col_num - sheet.col_count)
-            sheet.update_cell(1, col_num, "لينك الشيت")
+            with_retry(sheet.update_cell, 1, col_num, "لينك الشيت")
         else:
             col_num = headers.index("لينك الشيت") + 1
 
-        sheet.update_cell(row_num, col_num, link)
+        with_retry(sheet.update_cell, row_num, col_num, link)
         return True, "تم الحفظ بنجاح"
 
     except Exception as e:
@@ -280,18 +334,18 @@ def get_gsheet_link(office):
         sheet = get_accounts_sheet()
         if not sheet:
             return None
-        headers = sheet.row_values(1)
+        headers = with_retry(sheet.row_values, 1)
         if "لينك الشيت" not in headers:
             return None
         link_col = headers.index("لينك الشيت") + 1
 
         # بندور صف صف على عمود "اسم المكتب" (العمود الأول) بدل get_all_records
         # عشان نتجنب مشاكل الهيدرز الفاضية/المكررة اللي ممكن تطلع استثناء صامت
-        office_col_values = sheet.col_values(1)
+        office_col_values = with_retry(sheet.col_values, 1)
         target = str(office).strip()
         for i, val in enumerate(office_col_values[1:], start=2):  # صف 1 = هيدر
             if str(val).strip() == target:
-                link = sheet.cell(i, link_col).value
+                link = with_retry(sheet.cell, i, link_col).value
                 return link if link else None
         return None
     except Exception as e:
@@ -301,7 +355,7 @@ def get_gsheet_link(office):
 
 def _find_office_row(sheet, office):
     """بيرجع رقم صف المكتب في شيت الحسابات (أو None لو مش موجود)"""
-    office_col_values = sheet.col_values(1)
+    office_col_values = with_retry(sheet.col_values, 1)
     target = str(office).strip()
     for i, val in enumerate(office_col_values[1:], start=2):  # صف 1 = هيدر
         if str(val).strip() == target:
@@ -316,7 +370,7 @@ def get_auto_update_settings(office):
         if not sheet:
             return False, 12, None
 
-        headers = sheet.row_values(1)
+        headers = with_retry(sheet.row_values, 1)
         row_num = _find_office_row(sheet, office)
         if row_num is None:
             return False, 12, None
@@ -324,7 +378,7 @@ def get_auto_update_settings(office):
         def get_col(name, default=""):
             if name in headers:
                 col = headers.index(name) + 1
-                return sheet.cell(row_num, col).value or default
+                return with_retry(sheet.cell, row_num, col).value or default
             return default
 
         enabled = get_col("تحديث تلقائي", "لا") == "نعم"
@@ -351,7 +405,7 @@ def save_auto_update_settings(office, enabled, interval_hours):
         if row_num is None:
             return False, "المكتب غير موجود في شيت الحسابات"
 
-        headers = sheet.row_values(1)
+        headers = with_retry(sheet.row_values, 1)
 
         def ensure_col(name):
             nonlocal headers
@@ -359,15 +413,15 @@ def save_auto_update_settings(office, enabled, interval_hours):
                 col_num = len(headers) + 1
                 if col_num > sheet.col_count:
                     sheet.add_cols(col_num - sheet.col_count)
-                sheet.update_cell(1, col_num, name)
-                headers = sheet.row_values(1)
+                with_retry(sheet.update_cell, 1, col_num, name)
+                headers = with_retry(sheet.row_values, 1)
             return headers.index(name) + 1
 
         col_enabled = ensure_col("تحديث تلقائي")
         col_interval = ensure_col("كل كام ساعة")
 
-        sheet.update_cell(row_num, col_enabled, "نعم" if enabled else "لا")
-        sheet.update_cell(row_num, col_interval, str(interval_hours))
+        with_retry(sheet.update_cell, row_num, col_enabled, "نعم" if enabled else "لا")
+        with_retry(sheet.update_cell, row_num, col_interval, str(interval_hours))
         return True, "تم الحفظ"
     except Exception as e:
         print(f"خطأ في save_auto_update_settings: {e}")
@@ -408,20 +462,10 @@ def get_target_worksheet(spreadsheet, link):
 def read_gsheet_as_excel(link):
     """بيقرا التبويب المحدد في اللينك (حسب gid) من Google Sheet ويرجعه كـ BytesIO زي إكسيل"""
     try:
-        sheet_id = extract_sheet_id(link)
-        if not sheet_id:
+        ws = _get_office_worksheet(link)
+        if ws is None:
             return None, "الرابط غير صحيح!"
-
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=["https://spreadsheets.google.com/feeds",
-                    "https://www.googleapis.com/auth/drive"]
-        )
-        client = gspread.authorize(creds)
-        spreadsheet = client.open_by_key(sheet_id)
-        ws = get_target_worksheet(spreadsheet, link)
-        data = ws.get_all_values()
+        data = with_retry(ws.get_all_values)
 
         if not data:
             return None, "الشيت فاضي!"
@@ -440,20 +484,12 @@ def read_gsheet_as_excel(link):
 
 
 def _get_gsheet_worksheet(link):
-    """بترجع (worksheet, error) للتبويب المحدد في اللينك، بدون قراءة/تغيير أي بيانات"""
+    """بترجع (worksheet, error) للتبويب المحدد في اللينك (بنكاش الاتصال بدل ما
+    نفتحه من جديد مع كل نداء - بيتنادى مرة لكل طالب)."""
     try:
-        sheet_id = extract_sheet_id(link)
-        if not sheet_id:
+        ws = _get_office_worksheet(link)
+        if ws is None:
             return None, "الرابط غير صحيح"
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=["https://spreadsheets.google.com/feeds",
-                    "https://www.googleapis.com/auth/drive"]
-        )
-        client = gspread.authorize(creds)
-        spreadsheet = client.open_by_key(sheet_id)
-        ws = get_target_worksheet(spreadsheet, link)
         return ws, None
     except Exception as e:
         return None, str(e)
@@ -467,9 +503,9 @@ def ensure_status_header_in_gsheet(link, header_row_num, status_col_index, heade
         if err or not ws:
             return False
         col_num = status_col_index + 1
-        current = ws.cell(header_row_num, col_num).value
+        current = with_retry(ws.cell, header_row_num, col_num).value
         if str(current or "").strip() != header_name:
-            ws.update_cell(header_row_num, col_num, header_name)
+            with_retry(ws.update_cell, header_row_num, col_num, header_name)
         return True
     except Exception:
         return False
@@ -483,7 +519,7 @@ def update_status_cell_in_gsheet(link, row_num, status_col_index, value):
         ws, err = _get_gsheet_worksheet(link)
         if err or not ws:
             return False, err or "تعذر الوصول للشيت"
-        ws.update_cell(row_num, status_col_index + 1, value)
+        with_retry(ws.update_cell, row_num, status_col_index + 1, value)
         return True, None
     except Exception as e:
         return False, str(e)
@@ -492,20 +528,11 @@ def update_status_cell_in_gsheet(link, row_num, status_col_index, value):
 def get_results_sheet():
     """جيب أو أنشئ ورقة النتائج الموحدة (بديل رفع الملفات على Drive اللي مش شغال مع service account)"""
     try:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=["https://spreadsheets.google.com/feeds",
-                    "https://www.googleapis.com/auth/drive"]
-        )
-        client = gspread.authorize(creds)
-        spreadsheet = client.open_by_key(SHEET_ID)
-        try:
-            sheet = spreadsheet.worksheet("results")
-        except:
+        def create(spreadsheet):
             sheet = spreadsheet.add_worksheet("results", 2000, 4)
             sheet.append_row(["اسم المكتب", "اسم الطالب", "الحالة", "تاريخ التحديث"])
-        return sheet
+            return sheet
+        return _get_cached_worksheet("results", create)
     except Exception as e:
         print(f"خطأ في ورقة النتائج: {e}")
         return None
@@ -520,7 +547,7 @@ def save_results_to_sheet(office, results):
         if not sheet:
             return False, "مش قادر أوصل لورقة النتائج"
 
-        all_values = sheet.get_all_values()
+        all_values = with_retry(sheet.get_all_values)
         headers = all_values[0] if all_values else ["اسم المكتب", "اسم الطالب", "الحالة", "تاريخ التحديث"]
 
         target = str(office).strip()
@@ -531,8 +558,8 @@ def save_results_to_sheet(office, results):
         new_rows = [[target, r.get("name", ""), r.get("status", ""), now] for r in results]
 
         final_data = [headers] + kept_rows + new_rows
-        sheet.clear()
-        sheet.update(final_data)
+        with_retry(sheet.clear)
+        with_retry(sheet.update, final_data)
         return True, "تم حفظ النتائج"
     except Exception as e:
         print(f"خطأ في حفظ النتائج: {e}")
@@ -546,7 +573,7 @@ def search_results_in_sheet(office, name_query):
         if not sheet:
             return [], "مش قادر أوصل لورقة النتائج"
 
-        all_values = sheet.get_all_values()
+        all_values = with_retry(sheet.get_all_values)
         if len(all_values) <= 1:
             return [], "مفيش نتائج محفوظة لأي مكتب لسه — لازم تعملي '▶ ابدأ' مرة واحدة الأول."
 
@@ -618,7 +645,11 @@ def upload_to_drive(file_bytes, filename, office):
 # بدل ما الـ Streamlit App اللي شغال على Streamlit Cloud يعمل اللوجينز بنفسه.
 # التواصل بين الاتنين بيتم بالكامل عن طريق Google Sheets (tabs: worker_heartbeat, jobs, job_progress).
 
-WORKER_ONLINE_THRESHOLD_SECONDS = 150  # الـ Worker بيبعت نبضة كل 90 ثانية (لتوفير الـ API Quota) — بنسيب هامش دورتين
+# مفيش heartbeat خالص. بنعرف إن فيه Worker شغال أو لأ بطريقة واحدة بس: بننشئ
+# مهمة (job) ونستنى لحد 45 ثانية نشوف هل حالتها اتحولت لـ "processing" (يعني
+# حد شغال قاعد ياخدها) - لو حصل، نكمل معاه؛ لو لأ، نلغي المهمة ونشتغل Cloud.
+JOB_PICKUP_WAIT_SECONDS = 45
+JOB_PICKUP_POLL_INTERVAL = 3
 
 # الحالات اللي لو الطالب وصلها، ما بنعيدش فحصه في التحديثات الجاية
 FINAL_STATUSES = {
@@ -630,58 +661,17 @@ FINAL_STATUSES = {
 
 
 def _get_gs_client():
-    creds_dict = st.secrets["gcp_service_account"]
-    creds = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://spreadsheets.google.com/feeds",
-                "https://www.googleapis.com/auth/drive"]
-    )
-    return gspread.authorize(creds)
-
-
-def get_heartbeat_sheet():
-    try:
-        client = _get_gs_client()
-        spreadsheet = client.open_by_key(SHEET_ID)
-        try:
-            sheet = spreadsheet.worksheet("worker_heartbeat")
-        except Exception:
-            sheet = spreadsheet.add_worksheet("worker_heartbeat", 5, 2)
-            sheet.update_cell(1, 1, "آخر نبضة")
-            sheet.update_cell(1, 2, "")
-        return sheet
-    except Exception as e:
-        print(f"خطأ في get_heartbeat_sheet: {e}")
-        return None
-
-
-def is_worker_online():
-    """بيتأكد إن فيه Worker شغال دلوقتي بمقارنة آخر نبضة محفوظة بالوقت الحالي"""
-    try:
-        sheet = get_heartbeat_sheet()
-        if not sheet:
-            return False
-        last_beat_str = sheet.cell(1, 2).value
-        if not last_beat_str:
-            return False
-        last_beat = datetime.strptime(last_beat_str, "%Y-%m-%d %H:%M:%S")
-        return (datetime.now() - last_beat).total_seconds() <= WORKER_ONLINE_THRESHOLD_SECONDS
-    except Exception as e:
-        print(f"خطأ في is_worker_online: {e}")
-        return False
+    return _get_gspread_client()
 
 
 def get_jobs_sheet():
     try:
-        client = _get_gs_client()
-        spreadsheet = client.open_by_key(SHEET_ID)
-        try:
-            sheet = spreadsheet.worksheet("jobs")
-        except Exception:
+        def create(spreadsheet):
             sheet = spreadsheet.add_worksheet("jobs", 500, 9)
             sheet.append_row(["job_id", "اسم المكتب", "نوع المصدر", "مرجع المصدر",
                                "اسم الملف", "الحالة", "تاريخ الإنشاء", "final_drive_file_id", "خطأ"])
-        return sheet
+            return sheet
+        return _get_cached_worksheet("jobs", create)
     except Exception as e:
         print(f"خطأ في get_jobs_sheet: {e}")
         return None
@@ -689,14 +679,11 @@ def get_jobs_sheet():
 
 def get_progress_sheet():
     try:
-        client = _get_gs_client()
-        spreadsheet = client.open_by_key(SHEET_ID)
-        try:
-            sheet = spreadsheet.worksheet("job_progress")
-        except Exception:
+        def create(spreadsheet):
             sheet = spreadsheet.add_worksheet("job_progress", 5000, 5)
             sheet.append_row(["job_id", "index", "total", "اسم الطالب", "الحالة"])
-        return sheet
+            return sheet
+        return _get_cached_worksheet("job_progress", create)
     except Exception as e:
         print(f"خطأ في get_progress_sheet: {e}")
         return None
@@ -778,6 +765,45 @@ def get_job(job_id):
         if str(r.get("job_id", "")) == job_id:
             return r
     return None
+
+
+def cancel_job(job_id):
+    """بيلغي مهمة لسه pending (محدش شافها) - بنستخدمها لما محدش من الـ Worker
+    ياخدها خلال مهلة الانتظار، عشان نتأكد إنه لو الـ Worker اشتغل متأخر مايبقاش
+    فيه تعارض ويشتغل عليها من غير داعي."""
+    try:
+        sheet = get_jobs_sheet()
+        if not sheet:
+            return False
+        cell = sheet.find(job_id)
+        if not cell:
+            return False
+        row_num = cell.row
+        headers = sheet.row_values(1)
+        status_col = headers.index("الحالة") + 1
+        current_status = sheet.cell(row_num, status_col).value
+        if current_status == "pending":
+            sheet.update_cell(row_num, status_col, "cancelled")
+        return True
+    except Exception as e:
+        print(f"خطأ في cancel_job: {e}")
+        return False
+
+
+def wait_for_job_pickup(job_id):
+    """بيستنى لحد JOB_PICKUP_WAIT_SECONDS نشوف هل فيه Worker هياخد المهمة دي.
+    بيرجع (picked_up, last_job) - picked_up = True لو الحالة اتحولت processing
+    (أو خلصت أصلاً) خلال المهلة."""
+    waited = 0
+    job = None
+    while waited < JOB_PICKUP_WAIT_SECONDS:
+        job = get_job(job_id)
+        status = (job or {}).get("الحالة", "")
+        if status in ("processing", "done", "failed"):
+            return True, job
+        time.sleep(JOB_PICKUP_POLL_INTERVAL)
+        waited += JOB_PICKUP_POLL_INTERVAL
+    return False, job
 
 
 def get_job_progress_rows(job_id):
@@ -1419,7 +1445,26 @@ if file_bytes:
     st.markdown("<div class='section-title'>تحديث حالات الطلاب</div><div class='section-sub'>اضغط الزر لبدء فحص الطلبات وتحديث النتائج.</div>", unsafe_allow_html=True)
     if st.button("▶ تحديث حالات الطلاب", key="start_main"):
         log_to_sheet(office, "رفع ملف", filename)
-        worker_online = is_worker_online()
+
+        # =====================================================================
+        # بننشئ المهمة على طول من غير ما نتأكد الأول إن فيه Worker شغال، وبعدين
+        # نستنى مهلة قصيرة (45 ثانية) نشوف هل حد هياخدها. لو محدش أخدها خلال
+        # المهلة، نلغيها ونشتغل بالطريقة العادية (Cloud) على طول.
+        # =====================================================================
+        if sheet_id_source and source == "🔗 ربط Google Sheets":
+            job_id = create_job(office, "gsheet", saved_link, filename or "google_sheet")
+        else:
+            pending_file_id, up_err = upload_pending_file(file_bytes, filename, office)
+            if up_err:
+                st.error(up_err); st.stop()
+            job_id = create_job(office, "drive_pending", pending_file_id, filename)
+
+        worker_online = False
+        if job_id:
+            with st.spinner("بنتأكد هل فيه جهاز محلي متصل هياخد التحديث..."):
+                worker_online, _ = wait_for_job_pickup(job_id)
+            if not worker_online:
+                cancel_job(job_id)
 
         # =====================================================================
         # المسار الأول: فيه Worker شغال على جهاز محلي → نحوّل الشغل ليه
@@ -1434,72 +1479,60 @@ if file_bytes:
                 unsafe_allow_html=True,
             )
 
-            if sheet_id_source and source == "🔗 ربط Google Sheets":
-                job_id = create_job(office, "gsheet", saved_link, filename or "google_sheet")
-            else:
-                pending_file_id, up_err = upload_pending_file(file_bytes, filename, office)
-                if up_err:
-                    st.error(up_err); st.stop()
-                job_id = create_job(office, "drive_pending", pending_file_id, filename)
-
-            if not job_id:
-                st.error("مقدرتش أنشئ مهمة للـ Worker — هتشتغل بالطريقة العادية بدلاً من كده.")
-                worker_online = False
-            else:
-                progress = st.progress(0)
-                status_placeholder = st.empty()
-                seen_count = 0
-                job = None
-                max_wait_seconds = 60 * 60  # حد أقصى للانتظار (ساعة) كحماية من التعليق الأبدي
-                waited = 0
-                poll_interval = 5  # كل 5 ثواني بدل 3 — توفير للـ API Quota
-                while waited < max_wait_seconds:
-                    job = get_job(job_id)
-                    rows = get_job_progress_rows(job_id)
-                    if rows:
-                        latest = rows[-1]
-                        try:
-                            total_from_worker = int(latest.get("total", 0)) or len(rows)
-                        except Exception:
-                            total_from_worker = len(rows)
-                        status_placeholder.markdown(
-                            f"**{latest.get('اسم الطالب','')}:** {latest.get('الحالة','')}"
-                            f"<br><span style='color:#6b7280'>طالب {len(rows)} من {total_from_worker}</span>",
-                            unsafe_allow_html=True,
-                        )
-                        progress.progress(min(len(rows) / max(total_from_worker, 1), 1.0))
-                        seen_count = len(rows)
-
-                    job_status = (job or {}).get("الحالة", "")
-                    if job_status in ("done", "failed"):
-                        break
-                    time.sleep(poll_interval)
-                    waited += poll_interval
-
-                if job and job.get("الحالة") == "done":
-                    st.session_state.pending_file_bytes = None
-                    st.session_state.pending_filename = ""
-                    st.markdown(
-                        f"<div style='background:#ecfdf5;border:1px solid #bbf7d0;border-radius:14px;padding:16px;margin-top:15px;'>"
-                        f"<div style='font-size:17px;font-weight:800;color:#166534;'>اكتمل التحديث 🎉</div>"
-                        f"<div style='color:#166534;font-size:13px;margin-top:4px;'>إجمالي {seen_count} طالب اتحدث عن طريق الجهاز المحلي</div></div>",
+            progress = st.progress(0)
+            status_placeholder = st.empty()
+            seen_count = 0
+            job = None
+            max_wait_seconds = 60 * 60  # حد أقصى للانتظار (ساعة) كحماية من التعليق الأبدي
+            waited = 0
+            poll_interval = 5  # كل 5 ثواني — توفير للـ API Quota
+            while waited < max_wait_seconds:
+                job = get_job(job_id)
+                rows = get_job_progress_rows(job_id)
+                if rows:
+                    latest = rows[-1]
+                    try:
+                        total_from_worker = int(latest.get("total", 0)) or len(rows)
+                    except Exception:
+                        total_from_worker = len(rows)
+                    status_placeholder.markdown(
+                        f"**{latest.get('اسم الطالب','')}:** {latest.get('الحالة','')}"
+                        f"<br><span style='color:#6b7280'>طالب {len(rows)} من {total_from_worker}</span>",
                         unsafe_allow_html=True,
                     )
-                    final_file_id = job.get("final_drive_file_id", "")
-                    if final_file_id:
-                        final_bytes, dl_err = download_drive_file_bytes(final_file_id)
-                        if final_bytes:
-                            st.download_button(
-                                label="⬇ تحميل ملف Excel المحدث",
-                                data=final_bytes,
-                                file_name="students_updated.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            )
-                    log_to_sheet(office, "اكتمل المعالجة عبر Worker", filename)
-                elif job and job.get("الحالة") == "failed":
-                    st.error(f"فشل التحديث عن طريق الجهاز المحلي: {job.get('خطأ','')}")
-                else:
-                    st.warning("استنينا فترة طويلة ومفيش رد من الجهاز المحلي — جربي تاني أو استخدمي التحديث العادي.")
+                    progress.progress(min(len(rows) / max(total_from_worker, 1), 1.0))
+                    seen_count = len(rows)
+
+                job_status = (job or {}).get("الحالة", "")
+                if job_status in ("done", "failed"):
+                    break
+                time.sleep(poll_interval)
+                waited += poll_interval
+
+            if job and job.get("الحالة") == "done":
+                st.session_state.pending_file_bytes = None
+                st.session_state.pending_filename = ""
+                st.markdown(
+                    f"<div style='background:#ecfdf5;border:1px solid #bbf7d0;border-radius:14px;padding:16px;margin-top:15px;'>"
+                    f"<div style='font-size:17px;font-weight:800;color:#166534;'>اكتمل التحديث 🎉</div>"
+                    f"<div style='color:#166534;font-size:13px;margin-top:4px;'>إجمالي {seen_count} طالب اتحدث عن طريق الجهاز المحلي</div></div>",
+                    unsafe_allow_html=True,
+                )
+                final_file_id = job.get("final_drive_file_id", "")
+                if final_file_id:
+                    final_bytes, dl_err = download_drive_file_bytes(final_file_id)
+                    if final_bytes:
+                        st.download_button(
+                            label="⬇ تحميل ملف Excel المحدث",
+                            data=final_bytes,
+                            file_name="students_updated.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+                log_to_sheet(office, "اكتمل المعالجة عبر Worker", filename)
+            elif job and job.get("الحالة") == "failed":
+                st.error(f"فشل التحديث عن طريق الجهاز المحلي: {job.get('خطأ','')}")
+            else:
+                st.warning("استنينا فترة طويلة ومفيش رد من الجهاز المحلي — جربي تاني أو استخدمي التحديث العادي.")
 
         # =====================================================================
         # المسار الثاني (الأصلي): مفيش Worker شغال → نفس الطريقة القديمة بالظبط
