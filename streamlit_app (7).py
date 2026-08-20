@@ -439,13 +439,12 @@ def read_gsheet_as_excel(link):
         return None, str(e)
 
 
-def write_back_to_gsheet(link, wb):
-    """بيكتب النتائج تاني في نفس التبويب المحدد في اللينك (حسب gid)"""
+def _get_gsheet_worksheet(link):
+    """بترجع (worksheet, error) للتبويب المحدد في اللينك، بدون قراءة/تغيير أي بيانات"""
     try:
         sheet_id = extract_sheet_id(link)
         if not sheet_id:
-            return False
-
+            return None, "الرابط غير صحيح"
         creds_dict = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(
             creds_dict,
@@ -455,18 +454,39 @@ def write_back_to_gsheet(link, wb):
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(sheet_id)
         ws = get_target_worksheet(spreadsheet, link)
-        wsheet = wb.active
-
-        # حدث كل الخلايا
-        data = []
-        for row in wsheet.iter_rows(values_only=True):
-            data.append([str(c) if c is not None else "" for c in row])
-
-        ws.clear()
-        ws.update(data)
-        return True
+        return ws, None
     except Exception as e:
+        return None, str(e)
+
+
+def ensure_status_header_in_gsheet(link, header_row_num, status_col_index, header_name="حالة الطلب الجديدة"):
+    """بتتأكد إن هيدر عمود 'حالة الطلب الجديدة' مكتوب في شيت المكتب — وده العمود
+    الوحيد اللي الأجنت بيضيفه/يكتب فيه. لو موجود بالفعل، مبيعملش أي حاجة."""
+    try:
+        ws, err = _get_gsheet_worksheet(link)
+        if err or not ws:
+            return False
+        col_num = status_col_index + 1
+        current = ws.cell(header_row_num, col_num).value
+        if str(current or "").strip() != header_name:
+            ws.update_cell(header_row_num, col_num, header_name)
+        return True
+    except Exception:
         return False
+
+
+def update_status_cell_in_gsheet(link, row_num, status_col_index, value):
+    """بتكتب قيمة الحالة في خلية واحدة بس (عمود 'حالة الطلب الجديدة') لصف طالب
+    معيّن في شيت المكتب — من غير ما تلمس أي عمود أو صف تاني، ومن غير أي مسح
+    أو إعادة كتابة لباقي الشيت."""
+    try:
+        ws, err = _get_gsheet_worksheet(link)
+        if err or not ws:
+            return False, err or "تعذر الوصول للشيت"
+        ws.update_cell(row_num, status_col_index + 1, value)
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 
 def get_results_sheet():
@@ -590,6 +610,189 @@ def upload_to_drive(file_bytes, filename, office):
     except Exception as e:
         print(f"خطأ في رفع الملف: {e}")
         return False, f"فشل الرفع على Drive: {e}"
+
+
+# ==================== Worker (تحديث من جهاز محلي بدل Cloud) ====================
+# الفكرة: لو فيه Worker شغال على جهاز محلي (بيبعت "نبضة" كل شوية ثواني)، بنحوّل
+# شغل تسجيل الدخول للموقع الحكومي ليه (IP منزلي أقل عرضة للحظر من IP بتاع الـ Cloud)،
+# بدل ما الـ Streamlit App اللي شغال على Streamlit Cloud يعمل اللوجينز بنفسه.
+# التواصل بين الاتنين بيتم بالكامل عن طريق Google Sheets (tabs: worker_heartbeat, jobs, job_progress).
+
+WORKER_ONLINE_THRESHOLD_SECONDS = 150  # الـ Worker بيبعت نبضة كل 90 ثانية (لتوفير الـ API Quota) — بنسيب هامش دورتين
+
+# الحالات اللي لو الطالب وصلها، ما بنعيدش فحصه في التحديثات الجاية
+FINAL_STATUSES = {
+    "مقبول نهائي",
+    "تم الرفض",
+    "مرفوض نهائيًا",
+    "مرفوض نهائيا",
+}
+
+
+def _get_gs_client():
+    creds_dict = st.secrets["gcp_service_account"]
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive"]
+    )
+    return gspread.authorize(creds)
+
+
+def get_heartbeat_sheet():
+    try:
+        client = _get_gs_client()
+        spreadsheet = client.open_by_key(SHEET_ID)
+        try:
+            sheet = spreadsheet.worksheet("worker_heartbeat")
+        except Exception:
+            sheet = spreadsheet.add_worksheet("worker_heartbeat", 5, 2)
+            sheet.update_cell(1, 1, "آخر نبضة")
+            sheet.update_cell(1, 2, "")
+        return sheet
+    except Exception as e:
+        print(f"خطأ في get_heartbeat_sheet: {e}")
+        return None
+
+
+def is_worker_online():
+    """بيتأكد إن فيه Worker شغال دلوقتي بمقارنة آخر نبضة محفوظة بالوقت الحالي"""
+    try:
+        sheet = get_heartbeat_sheet()
+        if not sheet:
+            return False
+        last_beat_str = sheet.cell(1, 2).value
+        if not last_beat_str:
+            return False
+        last_beat = datetime.strptime(last_beat_str, "%Y-%m-%d %H:%M:%S")
+        return (datetime.now() - last_beat).total_seconds() <= WORKER_ONLINE_THRESHOLD_SECONDS
+    except Exception as e:
+        print(f"خطأ في is_worker_online: {e}")
+        return False
+
+
+def get_jobs_sheet():
+    try:
+        client = _get_gs_client()
+        spreadsheet = client.open_by_key(SHEET_ID)
+        try:
+            sheet = spreadsheet.worksheet("jobs")
+        except Exception:
+            sheet = spreadsheet.add_worksheet("jobs", 500, 9)
+            sheet.append_row(["job_id", "اسم المكتب", "نوع المصدر", "مرجع المصدر",
+                               "اسم الملف", "الحالة", "تاريخ الإنشاء", "final_drive_file_id", "خطأ"])
+        return sheet
+    except Exception as e:
+        print(f"خطأ في get_jobs_sheet: {e}")
+        return None
+
+
+def get_progress_sheet():
+    try:
+        client = _get_gs_client()
+        spreadsheet = client.open_by_key(SHEET_ID)
+        try:
+            sheet = spreadsheet.worksheet("job_progress")
+        except Exception:
+            sheet = spreadsheet.add_worksheet("job_progress", 5000, 5)
+            sheet.append_row(["job_id", "index", "total", "اسم الطالب", "الحالة"])
+        return sheet
+    except Exception as e:
+        print(f"خطأ في get_progress_sheet: {e}")
+        return None
+
+
+def upload_pending_file(file_bytes, filename, office):
+    """بيرفع ملف الطلاب على Drive مؤقتًا عشان الـ Worker يقدر يحمّله ويشتغل عليه.
+    بترجع (file_id, error)."""
+    try:
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+        import io as _io
+
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        service = build("drive", "v3", credentials=creds)
+
+        now = datetime.now().strftime("%Y%m%d_%H%M%S")
+        drive_filename = f"PENDING_{office}_{now}_{filename}"
+        file_metadata = {"name": drive_filename, "parents": [DRIVE_FOLDER_ID]}
+        media = MediaIoBaseUpload(
+            _io.BytesIO(file_bytes),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        created = service.files().create(
+            body=file_metadata, media_body=media, fields="id", supportsAllDrives=True
+        ).execute()
+        return created.get("id"), None
+    except Exception as e:
+        return None, f"فشل رفع الملف المؤقت على Drive: {e}"
+
+
+def download_drive_file_bytes(file_id):
+    """بيحمل ملف من Drive بالـ ID ويرجعه كـ bytes"""
+    try:
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseDownload
+        import io as _io
+
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        service = build("drive", "v3", credentials=creds)
+        request = service.files().get_media(fileId=file_id)
+        buf = _io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        buf.seek(0)
+        return buf.read(), None
+    except Exception as e:
+        return None, str(e)
+
+
+def create_job(office, source_type, source_ref, filename):
+    """بينشئ مهمة جديدة في شيت jobs عشان الـ Worker يلتقطها. بيرجع job_id."""
+    sheet = get_jobs_sheet()
+    if not sheet:
+        return None
+    job_id = f"{office}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{random.randint(1000,9999)}"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sheet.append_row([job_id, office, source_type, source_ref, filename, "pending", now, "", ""])
+    return job_id
+
+
+def get_job(job_id):
+    """بيرجع dict فيه بيانات المهمة الحالية (الحالة، الأخطاء، إلخ)"""
+    sheet = get_jobs_sheet()
+    if not sheet:
+        return None
+    records = sheet.get_all_records()
+    for r in records:
+        if str(r.get("job_id", "")) == job_id:
+            return r
+    return None
+
+
+def get_job_progress_rows(job_id):
+    """بيرجع كل صفوف التقدّم الخاصة بمهمة معينة، مرتبة حسب index"""
+    sheet = get_progress_sheet()
+    if not sheet:
+        return []
+    records = sheet.get_all_records()
+    rows = [r for r in records if str(r.get("job_id", "")) == job_id]
+    try:
+        rows.sort(key=lambda r: int(r.get("index", 0)))
+    except Exception:
+        pass
+    return rows
+
 
 # ==================== API ====================
 BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"
@@ -1216,72 +1419,192 @@ if file_bytes:
     st.markdown("<div class='section-title'>تحديث حالات الطلاب</div><div class='section-sub'>اضغط الزر لبدء فحص الطلبات وتحديث النتائج.</div>", unsafe_allow_html=True)
     if st.button("▶ تحديث حالات الطلاب", key="start_main"):
         log_to_sheet(office, "رفع ملف", filename)
-        wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
-        ws = wb.active
-        try:
-            cols, header_row_num = find_excel_columns(ws)
-        except Exception as e:
-            st.error(str(e)); st.stop()
+        worker_online = is_worker_online()
 
-        rows_data = list(ws.iter_rows(min_row=header_row_num + 1, values_only=False))
-        valid_rows = [r for r in rows_data if r[cols["email"]].value and r[cols["password"]].value]
-        total = len(valid_rows)
-        progress = st.progress(0)
-        status_placeholder = st.empty()
-        results_list_placeholder = st.container()
-        success = failed = 0
-        # النتائج اللي خلصت فعلاً — بتتحفظ أول بأول في شيت "results" بعد كل طالب،
-        # فلو التحديث اتوقف فجأة (قفل التاب / نت وقع)، اللي اتحدث فعلاً يفضل محفوظ ومتسجل.
-        processed_results = []
+        # =====================================================================
+        # المسار الأول: فيه Worker شغال على جهاز محلي → نحوّل الشغل ليه
+        # (نفس الشكل بالظبط قدام المكتب: اسم الطالب + حالته الجديدة تظهر أول
+        # بأول، والشيت بيتحدث تلقائيًا بنفس الطريقة، مفيش أي فرق ظاهر للمكتب)
+        # =====================================================================
+        if worker_online:
+            st.markdown(
+                "<div style='background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;"
+                "padding:10px 14px;color:#1d4ed8;font-size:13px;margin-bottom:10px;'>"
+                "🖥️ التحديث شغال دلوقتي عن طريق جهاز محلي متصل (أسرع وأأمن ضد الحظر)</div>",
+                unsafe_allow_html=True,
+            )
 
-        for idx, row in enumerate(valid_rows):
-            email = str(row[cols["email"]].value).strip()
-            password = str(row[cols["password"]].value).strip()
-            name = row[cols["name"]].value if cols["name"] is not None else ""
-            display_name = name or email
-
-            status_placeholder.markdown(f"**جاري تحديث:** {display_name}<br><span style='color:#6b7280'>طالب {idx+1} من {total}</span>", unsafe_allow_html=True)
-
-            session, csrf_token, err = api_login(email, password)
-            if err or not session:
-                # بنسيب سبب الفشل الحقيقي جوه الحالة (كود الخطأ من الموقع) عشان تقدري تفرقي
-                # بين فشل باسورد/إيميل غلط وبين حظر/rate-limit مؤقت من موقع الحكومة نفسه
-                current_status = f"فشل تسجيل الدخول ({err})" if err else "فشل تسجيل الدخول"
-                if cols["status"] is not None: row[cols["status"]].value = current_status
-                failed += 1
-            else:
-                app_num, current_status = get_status(session, csrf_token)
-                if cols["status"] is not None: row[cols["status"]].value = current_status
-                api_logout(session)
-                success += 1
-
-            # اعرضي النتيجة اللي طلعت للطالب ده قدام المستخدم فورًا
-            status_placeholder.markdown(f"**{display_name}:** {current_status}<br><span style='color:#6b7280'>طالب {idx+1} من {total}</span>", unsafe_allow_html=True)
-
-            # سجليه في قايمة النتائج المتراكمة واحفظيها فورًا في شيت النتائج
-            processed_results.append({"name": str(display_name), "status": str(current_status)})
-            save_results_to_sheet(office, processed_results)
-
-            # لو المصدر شيت Google متربط، اكتبي فيه أول بأول برضو (مش بس في الآخر)
-            # عشان لو التحديث اتقطع فجأة، الشيت بتاع المكتب نفسه يكون فيه اللي اتحدث فعلاً
             if sheet_id_source and source == "🔗 ربط Google Sheets":
-                write_back_to_gsheet(saved_link, wb)
+                job_id = create_job(office, "gsheet", saved_link, filename or "google_sheet")
+            else:
+                pending_file_id, up_err = upload_pending_file(file_bytes, filename, office)
+                if up_err:
+                    st.error(up_err); st.stop()
+                job_id = create_job(office, "drive_pending", pending_file_id, filename)
 
-            progress.progress((idx + 1) / max(total, 1))
-            if idx < total - 1: human_delay(10, 18)
+            if not job_id:
+                st.error("مقدرتش أنشئ مهمة للـ Worker — هتشتغل بالطريقة العادية بدلاً من كده.")
+                worker_online = False
+            else:
+                progress = st.progress(0)
+                status_placeholder = st.empty()
+                seen_count = 0
+                job = None
+                max_wait_seconds = 60 * 60  # حد أقصى للانتظار (ساعة) كحماية من التعليق الأبدي
+                waited = 0
+                poll_interval = 5  # كل 5 ثواني بدل 3 — توفير للـ API Quota
+                while waited < max_wait_seconds:
+                    job = get_job(job_id)
+                    rows = get_job_progress_rows(job_id)
+                    if rows:
+                        latest = rows[-1]
+                        try:
+                            total_from_worker = int(latest.get("total", 0)) or len(rows)
+                        except Exception:
+                            total_from_worker = len(rows)
+                        status_placeholder.markdown(
+                            f"**{latest.get('اسم الطالب','')}:** {latest.get('الحالة','')}"
+                            f"<br><span style='color:#6b7280'>طالب {len(rows)} من {total_from_worker}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        progress.progress(min(len(rows) / max(total_from_worker, 1), 1.0))
+                        seen_count = len(rows)
 
-        out = io.BytesIO(); wb.save(out); out.seek(0)
-        if sheet_id_source and source == "🔗 ربط Google Sheets":
-            st.success("تم تحديث Google Sheets تلقائيًا أول بأول أثناء التحديث!")
-        up_ok, up_msg = upload_to_drive(out.getvalue(), filename, office)
-        if up_ok: st.caption("تم حفظ نسخة احتياطية على Drive")
-        log_to_sheet(office, "اكتمل المعالجة", filename)
-        st.session_state.pending_file_bytes = None
-        st.session_state.pending_filename = ""
-        # النتائج اتحفظت أول بأول أثناء الحلقة، فمفيش داعي نحفظها تاني هنا
-        st.session_state.last_results = processed_results
-        st.markdown(f"<div style='background:#ecfdf5;border:1px solid #bbf7d0;border-radius:14px;padding:16px;margin-top:15px;'><div style='font-size:17px;font-weight:800;color:#166534;'>اكتمل التحديث 🎉</div><div style='color:#166534;font-size:13px;margin-top:4px;'>إجمالي {total} طالب · نجح {success} · فشل {failed}</div></div>", unsafe_allow_html=True)
-        st.download_button(label="⬇ تحميل ملف Excel المحدث", data=out, file_name="students_updated.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    job_status = (job or {}).get("الحالة", "")
+                    if job_status in ("done", "failed"):
+                        break
+                    time.sleep(poll_interval)
+                    waited += poll_interval
+
+                if job and job.get("الحالة") == "done":
+                    st.session_state.pending_file_bytes = None
+                    st.session_state.pending_filename = ""
+                    st.markdown(
+                        f"<div style='background:#ecfdf5;border:1px solid #bbf7d0;border-radius:14px;padding:16px;margin-top:15px;'>"
+                        f"<div style='font-size:17px;font-weight:800;color:#166534;'>اكتمل التحديث 🎉</div>"
+                        f"<div style='color:#166534;font-size:13px;margin-top:4px;'>إجمالي {seen_count} طالب اتحدث عن طريق الجهاز المحلي</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                    final_file_id = job.get("final_drive_file_id", "")
+                    if final_file_id:
+                        final_bytes, dl_err = download_drive_file_bytes(final_file_id)
+                        if final_bytes:
+                            st.download_button(
+                                label="⬇ تحميل ملف Excel المحدث",
+                                data=final_bytes,
+                                file_name="students_updated.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            )
+                    log_to_sheet(office, "اكتمل المعالجة عبر Worker", filename)
+                elif job and job.get("الحالة") == "failed":
+                    st.error(f"فشل التحديث عن طريق الجهاز المحلي: {job.get('خطأ','')}")
+                else:
+                    st.warning("استنينا فترة طويلة ومفيش رد من الجهاز المحلي — جربي تاني أو استخدمي التحديث العادي.")
+
+        # =====================================================================
+        # المسار الثاني (الأصلي): مفيش Worker شغال → نفس الطريقة القديمة بالظبط
+        # =====================================================================
+        if not worker_online:
+            is_gsheet_source = bool(sheet_id_source and source == "🔗 ربط Google Sheets")
+
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+            ws = wb.active
+            try:
+                cols, header_row_num = find_excel_columns(ws)
+            except Exception as e:
+                st.error(str(e)); st.stop()
+
+            # لو المصدر Google Sheets، وعمود "حالة الطلب الجديدة" ده كان جديد (مش
+            # موجود أصلاً)، سجّلي هيدره في شيت المكتب نفسه مرة واحدة بس. ده العمود
+            # الوحيد اللي بنكتب فيه، ومفيش أي عمود أو صف تاني بيتلمس أو يتغير ترتيبه.
+            if is_gsheet_source:
+                ensure_status_header_in_gsheet(saved_link, header_row_num, cols["status"])
+
+            # استبعاد الطلاب اللي حالتهم المحفوظة "نهائية" (زي قبول نهائي) —
+            # مفيش داعي نعيد فحصهم كل مرة
+            previous_by_name = {}
+            try:
+                _all_found, _e = search_results_in_sheet(office, "")
+                for r in (_all_found or []):
+                    previous_by_name[str(r.get("name", "")).strip()] = str(r.get("status", "")).strip()
+            except Exception:
+                previous_by_name = {}
+
+            rows_data = list(ws.iter_rows(min_row=header_row_num + 1, values_only=False))
+            all_valid_rows = [r for r in rows_data if r[cols["email"]].value and r[cols["password"]].value]
+
+            valid_rows = []
+            for r in all_valid_rows:
+                nm = str(r[cols["name"]].value or "").strip() if cols["name"] is not None else ""
+                if previous_by_name.get(nm) in FINAL_STATUSES:
+                    continue
+                valid_rows.append(r)
+
+            total = len(valid_rows)
+
+            # ترتيب المعالجة (اللوجين على موقع الحكومة) بيتشافل في كل مرة — ده بس
+            # ترتيب تسجيل الدخول في دماغ الأجنت، وما بيغيرش ترتيب أو مكان أي صف في
+            # شيت المكتب؛ كل طالب بيتكتب في نفس صفه الأصلي بالظبط.
+            processing_order = list(range(total))
+            random.shuffle(processing_order)
+
+            progress = st.progress(0)
+            status_placeholder = st.empty()
+            success = failed = 0
+            # النتائج اللي خلصت فعلاً — بتتحفظ أول بأول في شيت "results" بعد كل طالب،
+            # فلو التحديث اتوقف فجأة (قفل التاب / نت وقع)، اللي اتحدث فعلاً يفضل محفوظ ومتسجل.
+            processed_results = []
+
+            for done_count, pos in enumerate(processing_order):
+                row = valid_rows[pos]
+                email = str(row[cols["email"]].value).strip()
+                password = str(row[cols["password"]].value).strip()
+                name = row[cols["name"]].value if cols["name"] is not None else ""
+                display_name = name or email
+                row_num_in_sheet = row[cols["email"]].row  # الصف الحقيقي في الشيت (ثابت، مش بيتغير)
+
+                status_placeholder.markdown(f"**جاري تحديث:** {display_name}<br><span style='color:#6b7280'>طالب {done_count+1} من {total}</span>", unsafe_allow_html=True)
+
+                session, csrf_token, err = api_login(email, password)
+                if err or not session:
+                    # بنسيب سبب الفشل الحقيقي جوه الحالة (كود الخطأ من الموقع) عشان تقدري تفرقي
+                    # بين فشل باسورد/إيميل غلط وبين حظر/rate-limit مؤقت من موقع الحكومة نفسه
+                    current_status = f"فشل تسجيل الدخول ({err})" if err else "فشل تسجيل الدخول"
+                    if cols["status"] is not None: row[cols["status"]].value = current_status
+                    failed += 1
+                else:
+                    app_num, current_status = get_status(session, csrf_token)
+                    if cols["status"] is not None: row[cols["status"]].value = current_status
+                    api_logout(session)
+                    success += 1
+
+                # اعرضي النتيجة اللي طلعت للطالب ده قدام المستخدم فورًا
+                status_placeholder.markdown(f"**{display_name}:** {current_status}<br><span style='color:#6b7280'>طالب {done_count+1} من {total}</span>", unsafe_allow_html=True)
+
+                # سجليه في قايمة النتائج المتراكمة واحفظيها فورًا في شيت النتائج
+                processed_results.append({"name": str(display_name), "status": str(current_status)})
+                save_results_to_sheet(office, processed_results)
+
+                # لو المصدر شيت Google متربط، اكتبي بس خلية عمود "حالة الطلب الجديدة"
+                # بتاعة الصف ده — من غير ما تمسحي أو تعيدي كتابة أي حاجة تانية في الشيت
+                if is_gsheet_source:
+                    update_status_cell_in_gsheet(saved_link, row_num_in_sheet, cols["status"], current_status)
+
+                progress.progress((done_count + 1) / max(total, 1))
+                if done_count < total - 1: human_delay(10, 18)
+
+            out = io.BytesIO(); wb.save(out); out.seek(0)
+            if is_gsheet_source:
+                st.success("تم تحديث عمود 'حالة الطلب الجديدة' في شيت المكتب أول بأول أثناء التحديث!")
+            up_ok, up_msg = upload_to_drive(out.getvalue(), filename, office)
+            if up_ok: st.caption("تم حفظ نسخة احتياطية على Drive")
+            log_to_sheet(office, "اكتمل المعالجة", filename)
+            st.session_state.pending_file_bytes = None
+            st.session_state.pending_filename = ""
+            # النتائج اتحفظت أول بأول أثناء الحلقة، فمفيش داعي نحفظها تاني هنا
+            st.session_state.last_results = processed_results
+            st.markdown(f"<div style='background:#ecfdf5;border:1px solid #bbf7d0;border-radius:14px;padding:16px;margin-top:15px;'><div style='font-size:17px;font-weight:800;color:#166534;'>اكتمل التحديث 🎉</div><div style='color:#166534;font-size:13px;margin-top:4px;'>إجمالي {total} طالب · نجح {success} · فشل {failed}</div></div>", unsafe_allow_html=True)
+            st.download_button(label="⬇ تحميل ملف Excel المحدث", data=out, file_name="students_updated.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ===== Search =====
