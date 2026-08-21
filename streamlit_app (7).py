@@ -44,23 +44,47 @@ def _get_gspread_client():
 def _get_main_spreadsheet():
     return _get_gspread_client().open_by_key(SHEET_ID)
 
-
 def with_retry(fn, *args, max_retries=6, **kwargs):
-    """بينفذ أي نداء لـ gspread، ولو حصل 429 (quota exceeded) بيستنى وبيعيد المحاولة
-    بدل ما يوقف الصفحة بخطأ فورًا."""
-    delay = 5
+    """تنفيذ طلبات Google Sheets مع إعادة المحاولة للأخطاء المؤقتة."""
+    
+    delay = 3
+
     for attempt in range(1, max_retries + 1):
         try:
             return fn(*args, **kwargs)
-        except gspread.exceptions.APIError as e:
+
+        except Exception as e:
             msg = str(e)
-            if "429" in msg or "Quota exceeded" in msg or "RESOURCE_EXHAUSTED" in msg:
-                if attempt == max_retries:
-                    raise
+
+            transient_errors = [
+                "429",
+                "Quota exceeded",
+                "RESOURCE_EXHAUSTED",
+                "ProxyError",
+                "Unable to connect to proxy",
+                "RemoteDisconnected",
+                "ConnectionError",
+                "ConnectionResetError",
+                "Max retries exceeded",
+                "ReadTimeout",
+                "ConnectTimeout",
+                "Timeout",
+                "temporarily unavailable",
+            ]
+
+            is_transient = any(error in msg for error in transient_errors)
+
+            if is_transient and attempt < max_retries:
+                print(
+                    f"⚠️ خطأ اتصال مؤقت في Google Sheets "
+                    f"(المحاولة {attempt}/{max_retries}): {e}"
+                )
                 time.sleep(delay)
                 delay = min(delay * 2, 60)
                 continue
+
             raise
+
 
 
 _worksheet_cache = {}
