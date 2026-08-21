@@ -363,71 +363,6 @@ def _find_office_row(sheet, office):
     return None
 
 
-def get_auto_update_settings(office):
-    """بيرجع (enabled, interval_hours, last_auto_update) لإعدادات التحديث التلقائي بتاعة المكتب"""
-    try:
-        sheet = get_accounts_sheet()
-        if not sheet:
-            return False, 12, None
-
-        headers = with_retry(sheet.row_values, 1)
-        row_num = _find_office_row(sheet, office)
-        if row_num is None:
-            return False, 12, None
-
-        def get_col(name, default=""):
-            if name in headers:
-                col = headers.index(name) + 1
-                return with_retry(sheet.cell, row_num, col).value or default
-            return default
-
-        enabled = get_col("تحديث تلقائي", "لا") == "نعم"
-        interval_raw = get_col("كل كام ساعة", "12")
-        try:
-            interval = int(interval_raw)
-        except Exception:
-            interval = 12
-        last_update = get_col("آخر تحديث تلقائي", "") or None
-        return enabled, interval, last_update
-    except Exception as e:
-        print(f"خطأ في get_auto_update_settings: {e}")
-        return False, 12, None
-
-
-def save_auto_update_settings(office, enabled, interval_hours):
-    """بيحفظ إعدادات التحديث التلقائي (تفعيل + عدد الساعات) للمكتب"""
-    try:
-        sheet = get_accounts_sheet()
-        if not sheet:
-            return False, "مش قادر أوصل لشيت الحسابات"
-
-        row_num = _find_office_row(sheet, office)
-        if row_num is None:
-            return False, "المكتب غير موجود في شيت الحسابات"
-
-        headers = with_retry(sheet.row_values, 1)
-
-        def ensure_col(name):
-            nonlocal headers
-            if name not in headers:
-                col_num = len(headers) + 1
-                if col_num > sheet.col_count:
-                    sheet.add_cols(col_num - sheet.col_count)
-                with_retry(sheet.update_cell, 1, col_num, name)
-                headers = with_retry(sheet.row_values, 1)
-            return headers.index(name) + 1
-
-        col_enabled = ensure_col("تحديث تلقائي")
-        col_interval = ensure_col("كل كام ساعة")
-
-        with_retry(sheet.update_cell, row_num, col_enabled, "نعم" if enabled else "لا")
-        with_retry(sheet.update_cell, row_num, col_interval, str(interval_hours))
-        return True, "تم الحفظ"
-    except Exception as e:
-        print(f"خطأ في save_auto_update_settings: {e}")
-        return False, f"خطأ: {e}"
-
-
 def extract_sheet_id(link):
     """بيستخرج الـ Sheet ID من اللينك"""
     import re
@@ -658,6 +593,21 @@ FINAL_STATUSES = {
     "مرفوض نهائيًا",
     "مرفوض نهائيا",
 }
+
+# علامات على إن فشل تسجيل الدخول كان بسبب مشكلة اتصال مؤقتة (نت/SSL/تايم آوت)
+# مش بسبب إيميل أو باسورد غلط - الحالات دي بس بتتعاد محاولتها تلقائيًا في آخر
+# التحديث بدل ما تفضل مسجلة "فشل" نهائي من أول محاولة واحدة اتعطلت.
+TRANSIENT_ERROR_MARKERS = [
+    "SSLError", "SSLEOFError", "SSLZeroReturnError",
+    "ConnectionError", "ConnectionResetError", "RemoteDisconnected",
+    "Max retries exceeded", "Timeout", "ReadTimeout", "ConnectTimeout",
+    "EOF occurred",
+]
+
+
+def _is_transient_login_error(status_text):
+    text = str(status_text or "")
+    return text.startswith("فشل تسجيل الدخول") and any(marker in text for marker in TRANSIENT_ERROR_MARKERS)
 
 
 def _get_gs_client():
@@ -1401,40 +1351,6 @@ else:
                 st.session_state.pending_filename = filename
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ===== Auto update card =====
-st.markdown("<div class='card'>", unsafe_allow_html=True)
-st.markdown("<div class='section-title'>التحديث التلقائي</div><div class='section-sub'>فعّل التحديث التلقائي عشان بياناتك تتحدث لوحدها كل فترة معينة، بناءً على آخر ملف محفوظ (سواء Google Sheets المربوط أو آخر نسخة رفعتها). لو حالة أي طالب اتغيرت، هيتبعتلك إيميل بأسماء الطلاب اللي اتغيرت حالتهم فقط، على نفس الإيميل المسجل بيه حسابك.</div>", unsafe_allow_html=True)
-
-auto_enabled_saved, auto_interval_saved, last_auto_update = get_auto_update_settings(office)
-
-col_auto1, col_auto2 = st.columns([1, 1])
-with col_auto1:
-    new_auto_enabled = st.checkbox("تفعيل التحديث التلقائي", value=auto_enabled_saved, key="auto_update_toggle")
-with col_auto2:
-    interval_options = {"كل 6 ساعات": 6, "كل 12 ساعة": 12, "كل 24 ساعة": 24}
-    labels = list(interval_options.keys())
-    default_idx = 1
-    for idx, (label, hours) in enumerate(interval_options.items()):
-        if hours == auto_interval_saved:
-            default_idx = idx
-            break
-    chosen_label = st.selectbox("عدد الساعات بين كل تحديث والتاني", labels, index=default_idx, key="auto_update_interval")
-    new_interval = interval_options[chosen_label]
-
-if last_auto_update:
-    st.caption(f"آخر تحديث تلقائي: {last_auto_update}")
-else:
-    st.caption("لسه مفيش تحديث تلقائي حصل لهذا المكتب.")
-
-if st.button("حفظ إعدادات التحديث التلقائي", key="save_auto_update"):
-    ok, msg = save_auto_update_settings(office, new_auto_enabled, new_interval)
-    if ok:
-        st.success("تم حفظ الإعدادات! التحديث هيشتغل تلقائيًا في الخلفية حسب الفترة المختارة.")
-    else:
-        st.error(msg)
-
-st.markdown('</div>', unsafe_allow_html=True)
-
 if not file_bytes and st.session_state.get("pending_file_bytes"):
     file_bytes = st.session_state.pending_file_bytes
     filename = st.session_state.get("pending_filename", filename)
@@ -1625,6 +1541,55 @@ if file_bytes:
 
                 progress.progress((done_count + 1) / max(total, 1))
                 if done_count < total - 1: human_delay(10, 18)
+
+            # =================================================================
+            # إعادة محاولة تلقائية لمين فشل بسبب خطأ اتصال مؤقت (SSL/Timeout/...)
+            # مش بسبب إيميل أو باسورد غلط - عشان دول مش فشل حقيقي، مجرد
+            # الكونكشن اتقطع لحظتها.
+            # =================================================================
+            retry_indices = [
+                pos for pos in processing_order
+                if _is_transient_login_error(valid_rows[pos][cols["status"]].value if cols["status"] is not None else "")
+            ]
+
+            if retry_indices:
+                status_placeholder.markdown(
+                    f"🔁 بيعيد محاولة **{len(retry_indices)}** طالب فشلوا بسبب مشكلة اتصال مؤقتة..."
+                )
+                for r_i, pos in enumerate(retry_indices):
+                    row = valid_rows[pos]
+                    email = str(row[cols["email"]].value).strip()
+                    password = str(row[cols["password"]].value).strip()
+                    name = row[cols["name"]].value if cols["name"] is not None else ""
+                    display_name = name or email
+                    row_num_in_sheet = row[cols["email"]].row
+
+                    human_delay(5, 10)
+                    session, csrf_token, err = api_login(email, password)
+                    if err or not session:
+                        current_status = f"فشل تسجيل الدخول ({err})" if err else "فشل تسجيل الدخول"
+                    else:
+                        app_num, current_status = get_status(session, csrf_token)
+                        api_logout(session)
+
+                    if cols["status"] is not None:
+                        row[cols["status"]].value = current_status
+
+                    status_placeholder.markdown(
+                        f"🔁 **{display_name}:** {current_status}"
+                        f"<br><span style='color:#6b7280'>إعادة محاولة {r_i+1} من {len(retry_indices)}</span>",
+                        unsafe_allow_html=True,
+                    )
+
+                    # حدّثي النتيجة المتراكمة لنفس الطالب بدل ما نضيف سطر مكرر
+                    for r in processed_results:
+                        if r["name"] == str(display_name):
+                            r["status"] = str(current_status)
+                            break
+                    save_results_to_sheet(office, processed_results)
+
+                    if is_gsheet_source:
+                        update_status_cell_in_gsheet(saved_link, row_num_in_sheet, cols["status"], current_status)
 
             out = io.BytesIO(); wb.save(out); out.seek(0)
             if is_gsheet_source:
