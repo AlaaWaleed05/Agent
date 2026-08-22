@@ -44,47 +44,23 @@ def _get_gspread_client():
 def _get_main_spreadsheet():
     return _get_gspread_client().open_by_key(SHEET_ID)
 
-def with_retry(fn, *args, max_retries=6, **kwargs):
-    """تنفيذ طلبات Google Sheets مع إعادة المحاولة للأخطاء المؤقتة."""
-    
-    delay = 3
 
+def with_retry(fn, *args, max_retries=6, **kwargs):
+    """بينفذ أي نداء لـ gspread، ولو حصل 429 (quota exceeded) بيستنى وبيعيد المحاولة
+    بدل ما يوقف الصفحة بخطأ فورًا."""
+    delay = 5
     for attempt in range(1, max_retries + 1):
         try:
             return fn(*args, **kwargs)
-
-        except Exception as e:
+        except gspread.exceptions.APIError as e:
             msg = str(e)
-
-            transient_errors = [
-                "429",
-                "Quota exceeded",
-                "RESOURCE_EXHAUSTED",
-                "ProxyError",
-                "Unable to connect to proxy",
-                "RemoteDisconnected",
-                "ConnectionError",
-                "ConnectionResetError",
-                "Max retries exceeded",
-                "ReadTimeout",
-                "ConnectTimeout",
-                "Timeout",
-                "temporarily unavailable",
-            ]
-
-            is_transient = any(error in msg for error in transient_errors)
-
-            if is_transient and attempt < max_retries:
-                print(
-                    f"⚠️ خطأ اتصال مؤقت في Google Sheets "
-                    f"(المحاولة {attempt}/{max_retries}): {e}"
-                )
+            if "429" in msg or "Quota exceeded" in msg or "RESOURCE_EXHAUSTED" in msg:
+                if attempt == max_retries:
+                    raise
                 time.sleep(delay)
                 delay = min(delay * 2, 60)
                 continue
-
             raise
-
 
 
 _worksheet_cache = {}
@@ -613,9 +589,12 @@ JOB_PICKUP_POLL_INTERVAL = 3
 # الحالات اللي لو الطالب وصلها، ما بنعيدش فحصه في التحديثات الجاية
 FINAL_STATUSES = {
     "مقبول نهائي",
+    "قبول نهائي",
     "تم الرفض",
     "مرفوض نهائيًا",
     "مرفوض نهائيا",
+    "مرفوض",
+    "خالص",
 }
 
 # علامات على إن فشل تسجيل الدخول كان بسبب مشكلة اتصال مؤقتة (نت/SSL/تايم آوت)
@@ -1177,6 +1156,8 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
+if "update_locked" not in st.session_state:
+    st.session_state.update_locked = False
 
 # ===== Login =====
 if not st.session_state.logged_in and not st.session_state.is_admin:
@@ -1383,7 +1364,10 @@ if not file_bytes and st.session_state.get("pending_file_bytes"):
 if file_bytes:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>تحديث حالات الطلاب</div><div class='section-sub'>اضغط الزر لبدء فحص الطلبات وتحديث النتائج.</div>", unsafe_allow_html=True)
-    if st.button("▶ تحديث حالات الطلاب", key="start_main"):
+    if st.session_state.update_locked:
+        st.info("🔒 تم تشغيل تحديث بالفعل في هذه الجلسة. لو عايزة تبدئي تحديث جديد، سجّلي خروج وادخلي تاني.")
+    elif st.button("▶ تحديث حالات الطلاب", key="start_main"):
+        st.session_state.update_locked = True
         log_to_sheet(office, "رفع ملف", filename)
 
         # =====================================================================
@@ -1420,7 +1404,8 @@ if file_bytes:
             )
 
             progress = st.progress(0)
-            status_placeholder = st.empty()
+            status_caption = st.empty()
+            table_placeholder = st.empty()
             seen_count = 0
             job = None
             max_wait_seconds = 60 * 60  # حد أقصى للانتظار (ساعة) كحماية من التعليق الأبدي
@@ -1435,11 +1420,15 @@ if file_bytes:
                         total_from_worker = int(latest.get("total", 0)) or len(rows)
                     except Exception:
                         total_from_worker = len(rows)
-                    status_placeholder.markdown(
-                        f"**{latest.get('اسم الطالب','')}:** {latest.get('الحالة','')}"
-                        f"<br><span style='color:#6b7280'>طالب {len(rows)} من {total_from_worker}</span>",
-                        unsafe_allow_html=True,
+                    status_caption.markdown(
+                        f"طالب {len(rows)} من {total_from_worker}"
                     )
+                    # جدول بيتزود سطر بسطر - كل طالب اتفحص وحالته بيظهروا فورًا
+                    # عشان المكتب يكون مطمن إن التحديث شغال فعليًا
+                    table_df = pd.DataFrame(
+                        [{"اسم الطالب": r.get("اسم الطالب", ""), "الحالة": r.get("الحالة", "")} for r in reversed(rows)]
+                    )
+                    table_placeholder.dataframe(table_df, use_container_width=True, hide_index=True)
                     progress.progress(min(len(rows) / max(total_from_worker, 1), 1.0))
                     seen_count = len(rows)
 
@@ -1522,7 +1511,9 @@ if file_bytes:
             random.shuffle(processing_order)
 
             progress = st.progress(0)
-            status_placeholder = st.empty()
+            status_caption = st.empty()
+            table_placeholder = st.empty()
+            live_table_rows = []
             success = failed = 0
             # النتائج اللي خلصت فعلاً — بتتحفظ أول بأول في شيت "results" بعد كل طالب،
             # فلو التحديث اتوقف فجأة (قفل التاب / نت وقع)، اللي اتحدث فعلاً يفضل محفوظ ومتسجل.
@@ -1536,7 +1527,7 @@ if file_bytes:
                 display_name = name or email
                 row_num_in_sheet = row[cols["email"]].row  # الصف الحقيقي في الشيت (ثابت، مش بيتغير)
 
-                status_placeholder.markdown(f"**جاري تحديث:** {display_name}<br><span style='color:#6b7280'>طالب {done_count+1} من {total}</span>", unsafe_allow_html=True)
+                status_caption.markdown(f"جاري فحص: **{display_name}** — طالب {done_count+1} من {total}")
 
                 session, csrf_token, err = api_login(email, password)
                 if err or not session:
@@ -1551,8 +1542,10 @@ if file_bytes:
                     api_logout(session)
                     success += 1
 
-                # اعرضي النتيجة اللي طلعت للطالب ده قدام المستخدم فورًا
-                status_placeholder.markdown(f"**{display_name}:** {current_status}<br><span style='color:#6b7280'>طالب {done_count+1} من {total}</span>", unsafe_allow_html=True)
+                # ضيفي سطر الطالب ده لأعلى الجدول المتزايد قدام المكتب فورًا
+                live_table_rows.insert(0, {"اسم الطالب": str(display_name), "الحالة": str(current_status)})
+                table_placeholder.dataframe(pd.DataFrame(live_table_rows), use_container_width=True, hide_index=True)
+                status_caption.markdown(f"طالب {done_count+1} من {total}")
 
                 # سجليه في قايمة النتائج المتراكمة واحفظيها فورًا في شيت النتائج
                 processed_results.append({"name": str(display_name), "status": str(current_status)})
@@ -1577,7 +1570,7 @@ if file_bytes:
             ]
 
             if retry_indices:
-                status_placeholder.markdown(
+                status_caption.markdown(
                     f"🔁 بيعيد محاولة **{len(retry_indices)}** طالب فشلوا بسبب مشكلة اتصال مؤقتة..."
                 )
                 for r_i, pos in enumerate(retry_indices):
@@ -1599,10 +1592,15 @@ if file_bytes:
                     if cols["status"] is not None:
                         row[cols["status"]].value = current_status
 
-                    status_placeholder.markdown(
-                        f"🔁 **{display_name}:** {current_status}"
-                        f"<br><span style='color:#6b7280'>إعادة محاولة {r_i+1} من {len(retry_indices)}</span>",
-                        unsafe_allow_html=True,
+                    # حدّثي سطر الطالب ده في الجدول المعروض (مش إضافة سطر جديد،
+                    # تحديث نفس السطر بحالته الجديدة بعد إعادة المحاولة)
+                    for lr in live_table_rows:
+                        if lr["اسم الطالب"] == str(display_name):
+                            lr["الحالة"] = str(current_status)
+                            break
+                    table_placeholder.dataframe(pd.DataFrame(live_table_rows), use_container_width=True, hide_index=True)
+                    status_caption.markdown(
+                        f"🔁 إعادة محاولة {r_i+1} من {len(retry_indices)}"
                     )
 
                     # حدّثي النتيجة المتراكمة لنفس الطالب بدل ما نضيف سطر مكرر
