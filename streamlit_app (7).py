@@ -204,9 +204,23 @@ def get_job_progress_rows(job_id):
     return db().table("job_progress").select("student_index,total,student_name,status,created_at").eq("job_id",job_id).order("student_index").execute().data or []
 
 def get_students(office_id, search=""):
-    rows=db().table("student_records").select("id,student_name,login_identifier,application_status,status_updated_at,source_row_number").eq("office_id",office_id).order("student_name").execute().data or []
+    rows = (
+        db().table("student_records")
+        .select("id,student_name,login_identifier,application_status,status_updated_at,source_row_number,created_at,updated_at")
+        .eq("office_id", office_id)
+        .order("updated_at", desc=True)
+        .execute().data or []
+    )
+    # Each update imports a fresh source, so keep only the newest record for each student.
+    latest = {}
+    for row in rows:
+        key = str(row.get("login_identifier") or row.get("student_name") or "").strip().lower()
+        if key and key not in latest:
+            latest[key] = row
+    rows = sorted(latest.values(), key=lambda r: str(r.get("student_name") or "").lower())
     if search.strip():
-        q=search.strip().lower(); rows=[r for r in rows if q in str(r.get("student_name","")).lower()]
+        q = search.strip().lower()
+        rows = [r for r in rows if q in str(r.get("student_name", "")).lower()]
     return rows
 
 def status_class(status):
@@ -478,6 +492,8 @@ office=st.session_state.office
 if not office: st.session_state.logged_in=False; st.rerun()
 office_id=office["id"]
 
+st.markdown("<div class='topbar'><div class='brand'><div class='brand-icon'>✨</div><div><div class='brand-title'>Aivora</div><div class='brand-sub'>Your Smarter Support for Every Student's Application</div></div></div></div>", unsafe_allow_html=True)
+
 # ==================== Data source card ====================
 st.markdown('<div class="card">',unsafe_allow_html=True)
 st.markdown('<div class="section-title">مصدر بيانات الطلاب</div><div class="section-sub">اختر الطريقة التي يحتوي بها ملف الطلاب.</div>',unsafe_allow_html=True)
@@ -486,8 +502,16 @@ source=st.radio("",source_options,horizontal=True,label_visibility="collapsed",k
 file_bytes=None; filename=""; saved_link=get_saved_gsheet_link(office_id); sheet_id_source=None
 
 if source=="📂 رفع ملف Excel":
-    uploaded=st.file_uploader("ارفع ملف Excel",type=["xlsx","xls"],label_visibility="collapsed",key="excel_upload")
-    if uploaded: file_bytes=uploaded.getvalue(); filename=uploaded.name; st.success(f"تم اختيار الملف: {uploaded.name}")
+    uploaded = st.file_uploader(
+        "ارفع ملف Excel",
+        type=["xlsx", "xls"],
+        label_visibility="collapsed",
+        key="excel_upload",
+    )
+    if uploaded:
+        file_bytes = uploaded.getvalue()
+        filename = uploaded.name
+        st.success(f"تم اختيار الملف: {uploaded.name}")
 else:
     if saved_link:
         st.markdown('<div class="connected-box">✓ Google Sheets متصل بالفعل لهذا المكتب</div>',unsafe_allow_html=True); st.markdown("<div style='height:8px'></div>",unsafe_allow_html=True)
