@@ -324,6 +324,8 @@ def _run_legacy_api_fallback(job):
 
     total = len(students)
     failed = 0
+    live_table = st.empty()
+    live_rows = []
     for index, student in enumerate(students, 1):
         session = None
         status = "خطأ فني في الفحص"
@@ -350,13 +352,20 @@ def _run_legacy_api_fallback(job):
             "status_updated_at": stamp,
             "updated_at": stamp,
         }).eq("id", student["id"]).execute()
+        student_display = student.get("student_name") or student.get("login_identifier")
         db().table("job_progress").insert({
             "job_id": job["id"],
             "student_index": index,
             "total": total,
-            "student_name": student.get("student_name") or student.get("login_identifier"),
+            "student_name": student_display,
             "status": status,
         }).execute()
+        live_rows.append({"اسم الطالب": student_display, "الحالة الجديدة": status})
+        live_table.dataframe(
+            pd.DataFrame(live_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     db().table("jobs").update({
         "status": "failed" if failed >= total else "done",
@@ -552,7 +561,11 @@ if file_bytes:
             if rows:
                 total=int(rows[-1].get("total") or 0); current=len(rows)
                 st.progress(min(current/max(total,1),1.0)); st.caption(f"طالب {current} من {total}")
-                table_df=pd.DataFrame([{"اسم الطالب":r.get("student_name",""),"الحالة":r.get("status","")} for r in reversed(rows)])
+                latest = rows[-1]
+                latest_name = latest.get("student_name") or "طالب"
+                latest_status = latest.get("status") or ""
+                st.info(f"🔄 آخر طالب تم فحصه: **{latest_name}** — الحالة الجديدة: **{latest_status}**")
+                table_df=pd.DataFrame([{"اسم الطالب":r.get("student_name",""),"الحالة الجديدة":r.get("status","")} for r in reversed(rows)])
                 st.dataframe(table_df,use_container_width=True,hide_index=True)
             elif status=="pending": st.info("المهمة في الانتظار حتى يستلمها الـ Worker...")
             if status=="done":
