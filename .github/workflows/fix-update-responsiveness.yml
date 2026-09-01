@@ -1,0 +1,267 @@
+name: Fix Aivora update responsiveness
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Restore app from last good revision
+        run: |
+          git checkout d4b21f98035c742c374e641e4fa1cdf5d3c43f1e -- 'streamlit_app (7).py'
+
+      - name: Patch Streamlit background update flow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('streamlit_app (7).py')
+          s = p.read_text(encoding='utf-8')
+
+          s = s.replace('import time\n', 'import time\nimport threading\n', 1)
+
+          start = s.index('def _run_legacy_api_fallback(job):')
+          end = s.index('# ==================== UI ====================', start)
+          block = s[start:end]
+
+          # Background threads must never render Streamlit elements.
+          block = block.replace('    live_table = st.empty()\n', '')
+          block = block.replace('    live_rows = []\n', '')
+          block = block.replace('        live_rows.append({"اسم الطالب": student_display, "الحالة الجديدة": status})\n        live_table.dataframe(pd.DataFrame(live_rows), use_container_width=True, hide_index=True)\n', '')
+          block = block.replace('        live_table.markdown("**🔁 إعادة فحص الطلاب الذين ظهر لهم خطأ فني...**")\n', '')
+
+          old_wait = '''def wait_for_worker_or_legacy_fallback(job_id):
+    deadline = time.monotonic() + WORKER_WAIT_SECONDS
+    box = st.empty()
+    progress = st.progress(0.0)
+    while time.monotonic() < deadline:
+        job = get_job(job_id)
+        if not job:
+            progress.empty()
+            box.error("المهمة اختفت من Supabase.")
+            return "missing"
+        if str(job.get("status") or "pending") != "pending":
+            progress.empty()
+            return "worker"
+        elapsed = int(WORKER_WAIT_SECONDS - max(0, deadline - time.monotonic()))
+        remaining = max(0, WORKER_WAIT_SECONDS - elapsed)
+        box.info(f"بندور على الـ Worker... لو مش موجود، التحديث هيبدأ تلقائيًا بعد {remaining} ثانية.")
+        progress.progress(min(elapsed / WORKER_WAIT_SECONDS, 1.0))
+        time.sleep(2)
+
+    claimed = _claim_fallback_job(job_id)
+    progress.empty()
+    if claimed:
+        box.warning("الـ Worker ما استلمش المهمة خلال 30 ثانية — Streamlit بدأ التحديث بالطريقة القديمة.")
+        _run_legacy_api_fallback(claimed)
+        return "fallback"
+    return "worker"
+'''
+
+          new_wait = '''def wait_for_worker_or_legacy_fallback(job_id):
+    """Wait up to 30s for the local Worker, then claim and run legacy API fallback."""
+    deadline = time.monotonic() + WORKER_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        job = get_job(job_id)
+        if not job:
+            return "missing"
+        if str(job.get("status") or "pending") != "pending":
+            return "worker"
+        time.sleep(2)
+
+    claimed = _claim_fallback_job(job_id)
+    if claimed:
+        _run_legacy_api_fallback(claimed)
+        return "fallback"
+    return "worker"
+
+
+def _background_update_job(job_id):
+    """Run the Worker-first/fallback orchestration outside Streamlit's main script run."""
+    try:
+        wait_for_worker_or_legacy_fallback(job_id)
+    except Exception as exc:
+        try:
+            db().table("jobs").update({
+                "status": "failed",
+                "finished_at": now_iso(),
+                "error": str(exc)[:1000],
+            }).eq("id", job_id).execute()
+        except Exception as db_exc:
+            print(f"Background job error save failed: {db_exc}")
+'''
+
+          if old_wait not in s:
+              raise SystemExit('old wait function not found')
+          s = s.replace(old_wait, new_wait, 1)
+
+          # Re-assemble fallback block after its UI lines are removed.
+          s = s[:start] + block + s[end:]
+
+          start = s.index('# ==================== Processing ====================')
+          end = s.index('# ==================== Search ====================', start)
+
+          new_processing = r'''# ==================== Processing ====================
+@st.fragment(run_every=2)
+def render_processing():
+    has_upload = bool(file_bytes)
+    has_active_job = bool(st.session_state.active_job_id)
+    if not has_upload and not has_active_job:
+        return
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">تحديث حالات الطلاب</div><div class="section-sub">اضغط الزر لبدء فحص الطلبات وتحديث النتائج.</div>', unsafe_allow_html=True)
+
+    if st.session_state.update_locked and not has_active_job:
+        st.info("🔒 تم تشغيل تحديث بالفعل في هذه الجلسة. لو عايزة تبدئي تحديث جديد، سجّلي خروج وادخلي تاني.")
+    elif not st.session_state.update_locked and has_upload and not has_active_job:
+        if st.button("▶ تحديث حالات الطلاب", key="start_main"):
+            try:
+                # Don't allow two jobs for the same office at the same time.
+                running = (
+                    db().table("jobs")
+                    .select("id")
+                    .eq("office_id", office_id)
+                    .in_("status", ["pending", "processing"])
+                    .limit(1)
+                    .execute().data or []
+                )
+                if running:
+                    st.warning("في تحديث شغال بالفعل لهذا المكتب. استني لحد ما يخلص.")
+                else:
+                    st.session_state.update_locked = True
+                    is_gsheet_source = bool(saved_link and source == "🔗 ربط Google Sheets")
+                    source_type = "gsheet" if is_gsheet_source else "xlsx"
+                    source_name = "Google Sheet" if is_gsheet_source else (filename or "students.xlsx")
+                    src, count = import_students(
+                        office_id,
+                        source_type,
+                        source_name,
+                        file_bytes=file_bytes,
+                        source_url=saved_link if is_gsheet_source else None,
+                    )
+                    job = create_job(office_id, src, filename or source_name)
+                    st.session_state.active_job_id = job["id"]
+                    log_activity(
+                        office_id,
+                        "إنشاء مهمة تحديث حالات",
+                        filename or source_name,
+                        {"job_id": job["id"], "students": count},
+                        data_source_id=src["id"],
+                    )
+                    thread = threading.Thread(
+                        target=_background_update_job,
+                        args=(job["id"],),
+                        daemon=True,
+                    )
+                    thread.start()
+                    st.session_state.update_thread = thread
+                    st.success(f"تم تجهيز {count} طالب وبدأ التحديث.")
+                    st.rerun()
+            except Exception as exc:
+                st.session_state.update_locked = True
+                st.error(str(exc))
+
+    job = get_job(st.session_state.active_job_id) if st.session_state.active_job_id else None
+    if job:
+        status = str(job.get("status") or "pending")
+        if status == "pending":
+            st.info("⏳ بندور على الـ Worker... لو مش موجود، التحديث هيبدأ تلقائيًا بالطريقة القديمة بعد 30 ثانية.")
+        elif status == "processing":
+            if job.get("claimed_by") == "streamlit-fallback":
+                st.info("🔄 الـ Worker مش متصل — Streamlit شغال بالطريقة القديمة.")
+            else:
+                st.info("🖥️ التحديث شغال عن طريق الـ Worker المحلي.")
+
+        rows = get_job_progress_rows(job["id"])
+        if rows:
+            # Keep only the latest row per student so a retry never creates a duplicate in the UI.
+            latest = {}
+            for row in rows:
+                key = str(row.get("student_name") or "").strip().lower()
+                if not key:
+                    continue
+                latest[key] = row
+            display_rows = list(latest.values())
+            total = int(rows[-1].get("total") or 0)
+            current = min(len(display_rows), total) if total else len(display_rows)
+            st.progress(min(current / max(total, 1), 1.0))
+            st.caption(f"طالب {current} من {total}")
+            last_row = rows[-1]
+            last_name = last_row.get("student_name") or "طالب"
+            last_status = last_row.get("status") or ""
+            st.info(f"🔄 آخر طالب تم فحصه: **{last_name}** — الحالة الجديدة: **{last_status}**")
+            table_df = pd.DataFrame([
+                {"اسم الطالب": r.get("student_name", ""), "الحالة الجديدة": r.get("status", "")}
+                for r in reversed(display_rows)
+            ])
+            st.dataframe(table_df, use_container_width=True, hide_index=True)
+        elif status == "pending":
+            st.caption("المهمة لسه في الانتظار حتى يستلمها الـ Worker...")
+
+        if status == "done":
+            st.session_state.pending_file_bytes = None
+            st.session_state.pending_filename = ""
+            st.markdown('<div class="success-box"><div class="success-title">اكتمل التحديث 🎉</div><div class="success-desc">تمت معالجة الطلبات وتحديث الحالات.</div></div>', unsafe_allow_html=True)
+        elif status == "failed":
+            st.error(job.get("error") or "المهمة فشلت.")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+render_processing()
+
+'''
+          s = s[:start] + new_processing + s[end:]
+
+          # Keep logout available at the bottom and make sure login creates a fresh lock.
+          s = s.replace('("active_job_id",None)]', '("active_job_id",None),("update_thread",None)]', 1)
+
+          p.write_text(s, encoding='utf-8')
+          print('patched streamlit_app (7).py')
+          PY
+
+      - name: Add Worker retry progress row
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('worker.py')
+          s = p.read_text(encoding='utf-8')
+          old = '''                update_student_status(student["id"], retry_status)
+                for result in processed_results:
+'''
+          new = '''                update_student_status(student["id"], retry_status)
+                retry_progress_index = total + tech_retry_list.index(retry_item) + 1
+                append_progress(job_id, retry_progress_index, total, display_name, retry_status)
+                for result in processed_results:
+'''
+          if old not in s:
+              raise SystemExit('worker retry anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+          print('patched worker.py')
+          PY
+
+      - name: Verify Python syntax
+        run: |
+          python -m py_compile 'streamlit_app (7).py' worker.py
+
+      - name: Commit fixed files
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add 'streamlit_app (7).py' worker.py
+          git commit -m 'Fix responsive student updates and retry progress' || exit 0
+          git push origin HEAD:main
