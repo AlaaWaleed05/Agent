@@ -521,15 +521,19 @@ if source=="📂 رفع ملف Excel":
         key="excel_upload",
     )
     if uploaded:
-    file_bytes = uploaded.getvalue()
-    filename = uploaded.name
+        
+        file_bytes = uploaded.getvalue()
+        filename = uploaded.name
 
-    if uploaded.name.lower().endswith(".csv"):
-        df = pd.read_csv(io.BytesIO(file_bytes), encoding="utf-8-sig")
-    else:
-        df = pd.read_excel(io.BytesIO(file_bytes))
+        if uploaded.name.lower().endswith(".csv"):
+            
+            df = pd.read_csv(io.BytesIO(file_bytes), encoding="utf-8-sig")
+        else:
+            
+            df = pd.read_excel(io.BytesIO(file_bytes))
 
-    st.success(f"تم اختيار الملف: {uploaded.name}")
+        st.success(f"تم اختيار الملف: {uploaded.name}")
+  
 else:
     if saved_link:
         st.markdown('<div class="connected-box">✓ Google Sheets متصل بالفعل لهذا المكتب</div>',unsafe_allow_html=True); st.markdown("<div style='height:8px'></div>",unsafe_allow_html=True)
