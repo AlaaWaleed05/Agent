@@ -18,10 +18,11 @@ jobs:
       - run: python scripts/fallback_email_patch.py
       - run: python scripts/worker_timing_patch.py
       - run: python scripts/hide_technical_errors.py
+      - run: python scripts/office_update_ui_patch.py
       - run: python -m py_compile 'streamlit_app (7).py'
       - run: python -m py_compile worker.py
       - run: git config user.name github-actions[bot]
-      - run: git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-      - run: git add 'streamlit_app (7).py' worker.py scripts/worker_timing_patch.py scripts/hide_technical_errors.py
-      - run: git commit -m 'Shield technical errors from office UI' || true
+      - run: git config user.email 41898282+users.noreply.github.com
+      - run: git add 'streamlit_app (7).py' worker.py scripts/worker_timing_patch.py scripts/hide_technical_errors.py scripts/office_update_ui_patch.py
+      - run: git commit -m 'Polish office update progress UI' || true
       - run: git push
