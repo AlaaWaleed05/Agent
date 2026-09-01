@@ -1,23 +1,21 @@
 """
 Aivora Worker - Supabase + Selenium
 
-The worker uses Supabase for the queue, student records, progress and logs,
-while Selenium keeps the existing visible-Chrome flow for Study in Egypt.
+Supabase-backed worker for Aivora. Selenium keeps the visible Chrome flow
+against Study in Egypt; Supabase replaces the old Google Sheets queue,
+student-status and progress layer.
 
 Required environment variables:
     SUPABASE_URL
     SUPABASE_SERVICE_ROLE_KEY
     STUDENT_PASSWORD_ENCRYPTION_KEY
 
-Optional email variables:
+Optional:
     SENDER_EMAIL
     SENDER_APP_PASSWORD
     DEVELOPER_EMAIL
 
-IMPORTANT:
-- SUPABASE_SERVICE_ROLE_KEY is server-side only. Never expose it in Streamlit.
-- STUDENT_PASSWORD_ENCRYPTION_KEY must be the same Fernet key used when
-  student_records.encrypted_password values were created.
+The service-role key and encryption key are server-side secrets only.
 """
 
 import os
@@ -40,11 +38,9 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 
 
-# ==================== Settings ====================
 SITE_URL = "https://admission.study-in-egypt.gov.eg"
 LOGIN_URL = f"{SITE_URL}/login"
 INBOX_URL = f"{SITE_URL}/inbox"
-
 WAIT_TIME = 20
 JOB_POLL_INTERVAL_SECONDS = 25
 STUDENT_DELAY_MIN = 5
@@ -53,13 +49,8 @@ CONSECUTIVE_TECH_FAILURE_LIMIT = 5
 TECH_FAILURE_STATUS = "خطأ فني في الفحص"
 
 FINAL_STATUSES = {
-    "مقبول نهائي",
-    "قبول نهائي",
-    "تم الرفض",
-    "مرفوض نهائيًا",
-    "مرفوض نهائيا",
-    "مرفوض",
-    "خالص",
+    "مقبول نهائي", "قبول نهائي", "تم الرفض", "مرفوض نهائيًا",
+    "مرفوض نهائيا", "مرفوض", "خالص",
 }
 
 WORKER_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
@@ -72,8 +63,7 @@ def get_supabase() -> Client:
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
         raise RuntimeError(
-            "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. "
-            "The worker must use the server-side service-role key."
+            "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY."
         )
     return create_client(url, key)
 
@@ -83,10 +73,8 @@ class Database:
         self.sb = get_supabase()
 
     def claim_next_pending_job(self):
-        """Atomically claim the oldest pending job using the Postgres RPC."""
         result = self.sb.rpc(
-            "claim_next_job",
-            {"p_worker_id": WORKER_ID},
+            "claim_next_job", {"p_worker_id": WORKER_ID}
         ).execute()
         rows = result.data or []
         return rows[0] if rows else None
@@ -120,8 +108,7 @@ class Database:
         )
         if data_source_id:
             query = query.eq("data_source_id", data_source_id)
-        result = query.order("source_row_number").execute()
-        return result.data or []
+        return (query.order("source_row_number").execute().data or [])
 
     def update_student_status(self, student_id, status):
         now = datetime.now(timezone.utc).isoformat()
@@ -140,8 +127,9 @@ class Database:
             "status": status,
         }).execute()
 
-    def log_activity(self, office_id, data_source_id=None, student_record_id=None,
-                     action="", file_name="", details=None):
+    def log_activity(self, office_id, data_source_id=None,
+                     student_record_id=None, action="", file_name="",
+                     details=None):
         self.sb.table("activity_logs").insert({
             "office_id": office_id,
             "data_source_id": data_source_id,
@@ -152,7 +140,7 @@ class Database:
         }).execute()
 
 
-# ==================== Password handling ====================
+# ==================== Password ====================
 
 def decrypt_student_password(student):
     encrypted = student.get("encrypted_password")
@@ -160,11 +148,9 @@ def decrypt_student_password(student):
         raise ValueError(
             f"No encrypted password for student {student.get('student_name')}"
         )
-
     key = os.environ.get("STUDENT_PASSWORD_ENCRYPTION_KEY")
     if not key:
         raise RuntimeError("STUDENT_PASSWORD_ENCRYPTION_KEY is not configured")
-
     try:
         return Fernet(key.encode()).decrypt(str(encrypted).encode()).decode()
     except InvalidToken as exc:
@@ -173,7 +159,7 @@ def decrypt_student_password(student):
         ) from exc
 
 
-# ==================== Email notifications ====================
+# ==================== Email ====================
 
 def send_email(to_email, subject, body):
     sender = os.environ.get("SENDER_EMAIL")
@@ -196,21 +182,11 @@ def notify_technical_failures(office_name, job_id, failures, stopped_early):
     developer_email = os.environ.get("DEVELOPER_EMAIL")
     if not developer_email or not failures:
         return
-
-    title = "⚠️ Aivora Worker - أخطاء فنية"
-    if stopped_early:
-        title = "🛑 Aivora Worker - تم إيقاف المهمة"
-
-    lines = [
-        title,
-        f"المكتب: {office_name}",
-        f"job_id: {job_id}",
-        f"عدد الأخطاء: {len(failures)}",
-        "",
-    ]
+    title = "🛑 Aivora Worker - تم إيقاف المهمة" if stopped_early else "⚠️ Aivora Worker - أخطاء فنية"
+    lines = [title, f"المكتب: {office_name}", f"job_id: {job_id}",
+             f"عدد الأخطاء: {len(failures)}", ""]
     for i, failure in enumerate(failures[:100], 1):
         lines.append(f"{i}. {failure['name']}: {failure['error']}")
-
     send_email(developer_email, f"{title} - {office_name}", "\n".join(lines))
 
 
@@ -230,9 +206,7 @@ def clear_session(driver):
     except Exception:
         pass
     try:
-        driver.execute_script(
-            "window.localStorage.clear(); window.sessionStorage.clear();"
-        )
+        driver.execute_script("window.localStorage.clear(); window.sessionStorage.clear();")
     except Exception:
         pass
 
@@ -244,9 +218,7 @@ def setup_browser():
     options.add_experimental_option("useAutomationExtension", False)
     options.add_argument("--start-maximized")
     driver = webdriver.Chrome(options=options)
-    driver.execute_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return driver
 
 
@@ -263,38 +235,28 @@ def selenium_login(driver, email, password):
         clear_session(driver)
         driver.get(LOGIN_URL)
         wait = WebDriverWait(driver, WAIT_TIME)
-
         email_field = wait.until(EC.presence_of_element_located(
             (By.CSS_SELECTOR, "input[type='email'], input[name='email']")
         ))
         email_field.click()
         human_type(email_field, email)
-
         password_field = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
         password_field.click()
         human_type(password_field, password)
-
         login_btn = driver.find_element(
             By.CSS_SELECTOR, "button[type='submit'], input[type='submit']"
         )
         login_btn.click()
-
         for _ in range(15):
             time.sleep(1)
             try:
-                driver.find_element(
-                    By.CSS_SELECTOR,
-                    "input[type='email'], input[name='email']"
-                )
+                driver.find_element(By.CSS_SELECTOR, "input[type='email'], input[name='email']")
                 still_login = True
             except Exception:
                 still_login = False
-
             if not still_login or "login" not in driver.current_url:
                 return True, False, None
-
         return False, False, "فشل تسجيل الدخول"
-
     except (TimeoutException, WebDriverException) as exc:
         return False, True, f"خطأ فني في صفحة اللوجين: {exc}"
     except Exception as exc:
@@ -328,37 +290,29 @@ def selenium_get_status(driver):
         wait = WebDriverWait(driver, WAIT_TIME)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table")))
         time.sleep(1.5)
-
-        headers = driver.find_elements(
-            By.CSS_SELECTOR, "table thead th, table tr th"
-        )
+        headers = driver.find_elements(By.CSS_SELECTOR, "table thead th, table tr th")
         header_texts = [h.text.strip() for h in headers]
-
         status_index = None
         for i, header in enumerate(header_texts):
             if header in ("حالة الطلب", "الحالة"):
                 status_index = i
                 break
-
         if status_index is None:
             for i, header in enumerate(header_texts):
                 if "حالة" in header and "اسم" not in header and "خدمة" not in header:
                     status_index = i
                     break
-
         rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
         statuses = []
         for row in rows:
             cells = row.find_elements(By.CSS_SELECTOR, "td")
             if status_index is not None and status_index < len(cells):
-                status = cells[status_index].text.strip()
-                if status:
-                    statuses.append(status)
-
+                value = cells[status_index].text.strip()
+                if value:
+                    statuses.append(value)
         if not statuses:
             return "مفيش طلبات", False, None
         return statuses[0], False, None
-
     except (TimeoutException, WebDriverException) as exc:
         return "", True, f"خطأ فني في جلب حالة الطلب: {exc}"
     except Exception as exc:
@@ -369,8 +323,7 @@ def selenium_logout(driver):
     try:
         wait = WebDriverWait(driver, WAIT_TIME)
         user_menu = wait.until(EC.element_to_be_clickable(
-            (By.CSS_SELECTOR,
-             "[class*='user'], [class*='profile'], [class*='avatar'], [class*='account']")
+            (By.CSS_SELECTOR, "[class*='user'], [class*='profile'], [class*='avatar'], [class*='account']")
         ))
         user_menu.click()
         time.sleep(1)
@@ -392,20 +345,16 @@ def process_job(db: Database, job):
     office_id = job["office_id"]
     data_source_id = job.get("data_source_id")
     file_name = job.get("file_name") or "students.xlsx"
-
     office = db.get_office(office_id)
     office_name = office.get("name", "Unknown office")
 
     print(f"=== Starting Aivora job {job_id} for {office_name} ===")
-
-    # claim_next_job already sets processing atomically; this keeps the job
-    # timestamp/status correct even if the RPC is later changed.
-    db.set_job_status(job_id, "processing")
+    # claim_next_job already changes the row to processing atomically.
 
     students = db.get_students(office_id, data_source_id)
     pending = [
-        student for student in students
-        if str(student.get("application_status") or "").strip() not in FINAL_STATUSES
+        s for s in students
+        if str(s.get("application_status") or "").strip() not in FINAL_STATUSES
     ]
 
     if not pending:
@@ -415,18 +364,14 @@ def process_job(db: Database, job):
     random.shuffle(pending)
     total = len(pending)
     processed_count = 0
-    driver = setup_browser()
     technical_failures = []
     consecutive_tech_failures = 0
     stopped_early = False
+    driver = setup_browser()
 
     try:
         for index, student in enumerate(pending, 1):
-            name = str(
-                student.get("student_name")
-                or student.get("login_identifier")
-                or ""
-            ).strip()
+            name = str(student.get("student_name") or student.get("login_identifier") or "").strip()
             email = str(student.get("login_identifier") or "").strip()
             status = None
             is_technical = False
@@ -435,13 +380,9 @@ def process_job(db: Database, job):
             login_failed = False
 
             print(f"👤 [{index}/{total}] {name}")
-
             try:
                 password = decrypt_student_password(student)
-                ok, is_technical, error_message = selenium_login(
-                    driver, email, password
-                )
-
+                ok, is_technical, error_message = selenium_login(driver, email, password)
                 if not ok and not is_technical:
                     status = "فشل تسجيل الدخول"
                     login_failed = True
@@ -457,7 +398,6 @@ def process_job(db: Database, job):
                         status, is_technical, error_message = selenium_get_status(driver)
                         if is_technical:
                             status = TECH_FAILURE_STATUS
-
             except WebDriverException as exc:
                 browser_crashed = True
                 is_technical = True
@@ -480,10 +420,7 @@ def process_job(db: Database, job):
 
             if is_technical:
                 consecutive_tech_failures += 1
-                technical_failures.append({
-                    "name": name,
-                    "error": error_message or "Unknown error",
-                })
+                technical_failures.append({"name": name, "error": error_message or "Unknown error"})
                 print(f"   ⚠️ {error_message}")
             else:
                 consecutive_tech_failures = 0
@@ -512,7 +449,6 @@ def process_job(db: Database, job):
 
             if index < total:
                 time.sleep(random.uniform(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX))
-
     finally:
         try:
             driver.quit()
@@ -531,7 +467,7 @@ def process_job(db: Database, job):
     db.log_activity(
         office_id=office_id,
         data_source_id=data_source_id,
-        action="اكتمل تحديث حالات الطلاب عبر Worker (Selenium)",
+        action="اكتملت معالجة المهمة عبر Worker (Selenium)",
         file_name=file_name,
         details={
             "job_id": job_id,
@@ -544,17 +480,9 @@ def process_job(db: Database, job):
     )
 
     if technical_failures:
-        notify_technical_failures(
-            office_name,
-            job_id,
-            technical_failures,
-            stopped_early,
-        )
+        notify_technical_failures(office_name, job_id, technical_failures, stopped_early)
 
-    print(
-        f"=== Job {job_id} finished "
-        f"({processed_count}/{total}{', stopped early' if stopped_early else ''}) ==="
-    )
+    print(f"=== Job {job_id} finished ({processed_count}/{total}) ===")
 
 
 # ==================== Main loop ====================
@@ -562,9 +490,7 @@ def process_job(db: Database, job):
 def main():
     print(f"Aivora Worker (Supabase + Selenium) running — {WORKER_ID}")
     print(f"Polling every ~{JOB_POLL_INTERVAL_SECONDS}s")
-
     db = Database()
-
     while True:
         try:
             job = db.claim_next_pending_job()
@@ -575,7 +501,6 @@ def main():
                     JOB_POLL_INTERVAL_SECONDS * 0.7,
                     JOB_POLL_INTERVAL_SECONDS * 1.3,
                 ))
-
         except KeyboardInterrupt:
             print("Worker stopped manually.")
             break
