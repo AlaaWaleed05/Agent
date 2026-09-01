@@ -1,0 +1,298 @@
+name: Apply Aivora 30s fallback
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch Streamlit fallback
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          path = Path("streamlit_app (7).py")
+          text = path.read_text(encoding="utf-8")
+
+          marker = "# ==================== Legacy direct API fallback ===================="
+          if marker in text:
+              print("Fallback already present; nothing to do.")
+          else:
+              text = text.replace(
+                  "import re\nimport time",
+                  "import json\nimport random\nimport re\nimport time\n\nimport requests",
+                  1,
+              )
+
+              fallback = r'''
+
+# ==================== Legacy direct API fallback ====================
+BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"
+SITE_URL = "https://admission.study-in-egypt.gov.eg"
+WORKER_WAIT_SECONDS = 30
+FALLBACK_POLL_INTERVAL_SECONDS = 2
+
+HEADERS_BASE = {
+    "accept": "application/json, text/plain, */*",
+    "accept-language": "ar",
+    "device": "CITIZEN",
+    "origin": SITE_URL,
+    "referer": SITE_URL + "/",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "content-type": "application/json",
+}
+
+
+def decrypt_student_password(encrypted_password):
+    key = st.secrets.get("STUDENT_PASSWORD_ENCRYPTION_KEY", os.getenv("STUDENT_PASSWORD_ENCRYPTION_KEY"))
+    if not key:
+        raise RuntimeError("STUDENT_PASSWORD_ENCRYPTION_KEY مش موجود في Secrets.")
+    return Fernet(key.encode()).decrypt(str(encrypted_password).encode()).decode()
+
+
+def api_human_delay(min_sec=1, max_sec=3):
+    time.sleep(random.uniform(min_sec, max_sec))
+
+
+def fallback_api_login(email, password, max_retries=3):
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            session = requests.Session()
+            session.headers.update(HEADERS_BASE)
+            api_human_delay(1.5, 3)
+            response = session.post(
+                f"{BASE_URL}/student/login",
+                json={"email": email, "password": password},
+                timeout=30,
+            )
+            if response.status_code not in (200, 201):
+                last_error = f"فشل اللوجين - كود: {response.status_code}"
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt < max_retries:
+                        api_human_delay(2 * attempt, 4 * attempt)
+                        continue
+                return None, None, last_error
+            csrf_token = response.json().get("token", "") or response.headers.get("x-csrf-token", "")
+            return session, csrf_token, None
+        except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            last_error = str(exc)
+            if attempt < max_retries:
+                api_human_delay(2 * attempt, 4 * attempt)
+        except Exception as exc:
+            return None, None, str(exc)
+    return None, None, last_error or "فشل الاتصال بالموقع"
+
+
+def fallback_api_status(session, csrf_token):
+    try:
+        filter_obj = {
+            "where": {},
+            "limit": 10,
+            "offset": 0,
+            "order": "statusUpdatedAt DESC",
+            "fields": ["serviceSlug", "ID", "createdAt", "statusUpdatedAt", "activityId", "activityName"],
+        }
+        headers = {"x-csrf-token": csrf_token} if csrf_token else {}
+        response = session.get(
+            f"{BASE_URL}/dynamic_services/inbox",
+            params={"filter": json.dumps(filter_obj)},
+            headers=headers,
+            timeout=30,
+        )
+        if response.status_code not in (200, 304):
+            return f"خطأ في جلب الحالة ({response.status_code})"
+        results = response.json().get("result", [])
+        if not results:
+            return "مفيش طلبات"
+        translations = {
+            "قبول الفحص الفنى": "القبول المبدئي",
+            "قبول الفحص الفني": "القبول المبدئي",
+            "kb8ijfo8": "تم السداد",
+            "تم السداد": "تم السداد",
+            "تأكيد استلام الملف وصحة و اكتمال المستندات": "تأكيد استلام الملف وصحة واكتمال المستندات",
+            "الانتظار مراجعة الطلب": "بانتظار مراجعة الطلب",
+            "قبول من رئيس الادارة المركزية": "قبول من رئيس الإدارة المركزية",
+        }
+        return translations.get(results[0].get("activityName", "غير محدد"), results[0].get("activityName", "غير محدد"))
+    except Exception as exc:
+        return f"خطأ في جلب الحالة: {exc}"
+
+
+def fallback_api_logout(session):
+    if session is None:
+        return
+    try:
+        session.post(
+            f"{BASE_URL}/student/logout",
+            json={"redirectUrl": SITE_URL},
+            timeout=15,
+        )
+    except Exception:
+        pass
+
+
+def claim_job_for_streamlit(job_id):
+    rows = (
+        db().table("jobs")
+        .update({"status": "processing", "started_at": now_iso(), "claimed_by": "streamlit-fallback"})
+        .eq("id", job_id)
+        .eq("status", "pending")
+        .select("*")
+        .execute()
+        .data or []
+    )
+    return rows[0] if rows else None
+
+
+def set_fallback_job_status(job_id, status, error=None):
+    payload = {"status": status}
+    if status in {"done", "failed"}:
+        payload["finished_at"] = now_iso()
+    if error:
+        payload["error"] = str(error)[:1000]
+    db().table("jobs").update(payload).eq("id", job_id).execute()
+
+
+def process_job_with_streamlit_fallback(job):
+    job_id = str(job["id"])
+    query = db().table("student_records").select("*").eq("office_id", job["office_id"])
+    if job.get("data_source_id"):
+        query = query.eq("data_source_id", job["data_source_id"])
+    students = query.order("source_row_number").execute().data or []
+
+    students = [
+        s for s in students
+        if str(s.get("application_status") or "").strip() not in FINAL_STATUSES
+        and s.get("login_identifier") and s.get("encrypted_password")
+    ]
+    if not students:
+        set_fallback_job_status(job_id, "done")
+        return
+
+    random.shuffle(students)
+    total = len(students)
+    technical_errors = 0
+
+    for index, student in enumerate(students, start=1):
+        name = str(student.get("student_name") or student.get("login_identifier") or "").strip()
+        email = str(student.get("login_identifier") or "").strip()
+        session = None
+        status = None
+        try:
+            password = decrypt_student_password(student["encrypted_password"])
+            session, csrf_token, login_error = fallback_api_login(email, password)
+            if login_error:
+                status = "فشل تسجيل الدخول" if "كود:" in login_error else "خطأ فني في الفحص"
+                if status == "خطأ فني في الفحص":
+                    technical_errors += 1
+            else:
+                status = fallback_api_status(session, csrf_token)
+                if status.startswith("خطأ"):
+                    technical_errors += 1
+        except Exception as exc:
+            technical_errors += 1
+            status = "خطأ فني في الفحص"
+            print(f"Streamlit fallback error for {name}: {exc}")
+        finally:
+            fallback_api_logout(session)
+
+        stamp = now_iso()
+        db().table("student_records").update({
+            "application_status": str(status),
+            "status_updated_at": stamp,
+            "updated_at": stamp,
+        }).eq("id", student["id"]).execute()
+
+        db().table("job_progress").insert({
+            "job_id": job_id,
+            "student_index": index,
+            "total": total,
+            "student_name": name,
+            "status": str(status),
+        }).execute()
+
+        if index < total:
+            api_human_delay(1, 2.5)
+
+    if technical_errors < total:
+        set_fallback_job_status(job_id, "done")
+    else:
+        set_fallback_job_status(job_id, "failed", "فشل فني في كل الطلاب")
+
+    log_activity(
+        job.get("office_id"),
+        "اكتمل تحديث حالات الطلاب عبر Streamlit fallback (Legacy API)",
+        job.get("file_name") or "",
+        {"job_id": job_id, "students_processed": total, "technical_errors": technical_errors},
+        data_source_id=job.get("data_source_id"),
+    )
+
+
+def wait_for_worker_or_fallback(job_id):
+    deadline = time.monotonic() + WORKER_WAIT_SECONDS
+    status_box = st.empty()
+    progress_box = st.progress(0.0)
+
+    while time.monotonic() < deadline:
+        current = get_job(job_id)
+        if not current:
+            progress_box.empty()
+            status_box.error("المهمة اختفت من Supabase.")
+            return "missing"
+        status = str(current.get("status") or "pending")
+        if status != "pending":
+            progress_box.empty()
+            status_box.success("الـ Worker استلم المهمة.")
+            return "worker"
+        elapsed = WORKER_WAIT_SECONDS - max(0, int(deadline - time.monotonic()))
+        remaining = max(0, WORKER_WAIT_SECONDS - elapsed)
+        status_box.info(f"بندور على الـ Worker... لو مش موجود، Streamlit هيبدأ تلقائيًا بعد {remaining} ثانية.")
+        progress_box.progress(min(elapsed / WORKER_WAIT_SECONDS, 1.0))
+        time.sleep(FALLBACK_POLL_INTERVAL_SECONDS)
+
+    status_box.warning("الـ Worker ما استلمش المهمة خلال 30 ثانية — Streamlit بيبدأ التحديث مباشرة بالطريقة القديمة.")
+    claimed = claim_job_for_streamlit(job_id)
+    progress_box.empty()
+    if claimed:
+        process_job_with_streamlit_fallback(claimed)
+        return "fallback"
+
+    current = get_job(job_id)
+    return "worker" if current and current.get("status") != "pending" else "claim_failed"
+'''
+              text = text.replace("# ==================== UI ====================", fallback + "\n\n# ==================== UI ====================", 1)
+
+              pattern = re.compile(r'^if st\.button\("▶ ابدأ التحديث".*?(?=^if st\.session_state\.active_job_id:)', re.M | re.S)
+              replacement = '''if st.button("▶ ابدأ التحديث", key="start_update", disabled=(file_bytes is None and not source_url)):\n    try:\n        with st.spinner("بنجهز بيانات الطلاب في Supabase..."):\n            source_type = "xlsx" if file_bytes is not None else "gsheet"\n            source, count = import_students(office_id, source_type, file_name if file_bytes is not None else "Google Sheet", file_bytes=file_bytes, source_url=source_url)\n            job = create_job(office_id, source, file_name)\n            st.session_state.active_job_id = job["id"]\n            log_activity(office_id, "إنشاء مهمة تحديث حالات", file_name, {"job_id": job["id"], "students": count}, data_source_id=source["id"])\n        st.success(f"تم تجهيز {count} طالب.")\n        result = wait_for_worker_or_fallback(job["id"])\n        if result == "fallback":\n            st.success("الـ Worker ماكانش متصل، فـ Streamlit نفّذ التحديث مباشرة بالطريقة القديمة.")\n        elif result == "worker":\n            st.info("الـ Worker استلم المهمة، والنتيجة هتظهر هنا تلقائيًا.")\n        elif result == "claim_failed":\n            st.warning("المهمة لسه معلقة. ممكن Worker يكون استلمها في نفس اللحظة؛ حدّثي الصفحة بعد قليل.")\n        st.rerun()\n    except Exception as exc:\n        st.error(str(exc))\n\n\n'''
+              new_text, count = pattern.subn(replacement, text, count=1)
+              if count != 1:
+                  raise SystemExit("Could not locate the start-update block safely")
+              text = new_text
+              path.write_text(text, encoding="utf-8")
+              print("Aivora 30-second Worker fallback applied.")
+          
+      - name: Validate Python
+        run: python -m py_compile "streamlit_app (7).py"
+
+      - name: Commit and push patch, then remove workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/restore-30s-fallback.yml
+          git add "streamlit_app (7).py" .github/workflows/restore-30s-fallback.yml
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Restore 30-second Streamlit fallback"
+          git push
