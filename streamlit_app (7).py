@@ -265,15 +265,25 @@ def upsert_students(office_id, source_id, records):
 
 
 def create_data_source(office_id, source_type, source_name, source_url=None, mapping=None):
+    source_type_map = {
+        "xlsx": "excel",
+        "xls": "excel",
+        "gsheet": "google_sheet",
+        "google_sheet": "google_sheet",
+        "csv": "csv",
+    }
+
+    normalized_source_type = source_type_map.get(source_type, source_type)
+
     row = db().table("data_sources").insert({
         "office_id": office_id,
-        "source_type": source_type,
+        "source_type": normalized_source_type,
         "source_name": source_name,
         "source_url": source_url,
         "column_mapping": mapping or {},
     }).execute().data
-    return row[0]
 
+    return row[0]
 
 def import_students(office_id, source_type, source_name, file_bytes=None, source_url=None):
     if source_type == "xlsx":
