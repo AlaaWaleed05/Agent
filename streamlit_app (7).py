@@ -464,23 +464,11 @@ if st.session_state.is_admin:
     if st.button("تسجيل الخروج من الإدارة",key="admin_logout"): st.session_state.clear(); st.rerun()
     st.stop()
 
-# ==================== Dashboard ====================
+# ==================== Office page ====================
 office=st.session_state.office
 if not office: st.session_state.logged_in=False; st.rerun()
 office_id=office["id"]
-_hour=datetime.now().hour; _greeting="صباح الخير" if _hour<12 else "مساء الخير"
 
-st.markdown(f"<div class='topbar'><div class='brand'><div class='brand-icon'>✨</div><div><div class='brand-title'>Aivora</div><div class='brand-sub'>Your Smarter Support for Every Student's Application</div></div></div><div style='font-size:13px;color:#6b7280;'>نظام متابعة المكاتب</div></div>",unsafe_allow_html=True)
-
-st.markdown(f"<div class='hero'><div class='hero-kicker'>{_greeting} 👋</div><div class='hero-title'>أهلاً بيك، <strong>{office.get('name','')}</strong></div><div class='hero-desc'>تابع طلبات طلابك وحدّث الحالات من مكان واحد.</div></div>",unsafe_allow_html=True)
-
-students=get_students(office_id)
-counts={"total":len(students),"final":sum(str(s.get("application_status") or "") in FINAL_STATUSES for s in students),"pending":sum(str(s.get("application_status") or "") not in FINAL_STATUSES for s in students)}
-c1,c2,c3=st.columns(3)
-for col,label,value in [(c1,"إجمالي الطلاب",counts["total"]),(c2,"حالات نهائية",counts["final"]),(c3,"محتاج تحديث",counts["pending"])]:
-    with col: st.markdown(f"<div class='stat-card'><div class='stat-label'>{label}</div><div class='stat-value'>{value}</div></div>",unsafe_allow_html=True)
-
-st.markdown("<div style='height:18px'></div>",unsafe_allow_html=True)
 # ==================== Data source card ====================
 st.markdown('<div class="card">',unsafe_allow_html=True)
 st.markdown('<div class="section-title">مصدر بيانات الطلاب</div><div class="section-sub">اختر الطريقة التي يحتوي بها ملف الطلاب.</div>',unsafe_allow_html=True)
