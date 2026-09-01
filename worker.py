@@ -25,6 +25,7 @@ import socket
 import smtplib
 import time
 import uuid
+import traceback
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 
@@ -55,13 +56,37 @@ CONSECUTIVE_TECH_FAILURE_LIMIT = 5
 WORKER_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
 
 # ==================== Supabase ====================
+import json
+import os
+import json
+from pathlib import Path
+
+CONFIG_FILE = Path(__file__).with_name("service_account.json")
+
+def get_config():
+    config = {}
+
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+
+    return config
+
+
+CONFIG = get_config()
+
+
+def get_setting(name, required=True):
+    value = os.environ.get(name) or CONFIG.get(name)
+
+    if required and not value:
+        raise RuntimeError(f"{name} مش موجود لا في Environment Variables ولا في Save Accounts.json.")
+
+    return value
+
 def get_supabase() -> Client:
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-    if not url or not key:
-        raise RuntimeError(
-            "محتاج SUPABASE_URL و SUPABASE_SERVICE_ROLE_KEY في environment variables."
-        )
+    url = get_setting("SUPABASE_URL")
+    key = get_setting("SUPABASE_SERVICE_ROLE_KEY")
     return create_client(url, key)
 
 
@@ -73,26 +98,39 @@ def now_iso():
 
 
 def decrypt_student_password(encrypted_password):
-    key = os.environ.get("STUDENT_PASSWORD_ENCRYPTION_KEY")
-    if not key:
-        raise RuntimeError("STUDENT_PASSWORD_ENCRYPTION_KEY مش موجود.")
-    return Fernet(key.encode()).decrypt(str(encrypted_password).encode()).decode()
+    key = get_setting("STUDENT_PASSWORD_ENCRYPTION_KEY")
+    return Fernet(key.encode()).decrypt(
+        str(encrypted_password).encode()
+    ).decode()
 
 
 # ==================== Supabase helpers ====================
 def claim_next_pending_job():
-    """يمسك Job واحدة فقط بطريقة atomic عن طريق PostgreSQL RPC.
-
-    الـRPC نفسها بتعمل SELECT ... FOR UPDATE SKIP LOCKED ثم تغيّر الحالة من
-    pending إلى processing في نفس المعاملة، وبالتالي تشغيل 5 Workers في نفس
-    الوقت ما يخليهمش يمسكوا نفس الـjob.
-    """
     result = db.rpc(
         "claim_next_job",
         {"p_worker_id": WORKER_ID},
     ).execute()
-    rows = result.data or []
-    return rows[0] if rows else None
+
+    data = result.data
+
+    if not data:
+        return None
+
+    # لو الـRPC رجعت Dictionary لكن مفيش Job فعلية
+    if isinstance(data, dict):
+        if not data.get("id"):
+            return None
+        return data
+
+    # لو رجعت List
+    if isinstance(data, list):
+        if not data:
+            return None
+        if isinstance(data[0], dict) and not data[0].get("id"):
+            return None
+        return data[0]
+
+    return None
 
 
 def set_job_status(job_id, status, error=None, final_drive_file_id=None):
@@ -193,19 +231,25 @@ def get_status_changes(previous_results, processed_results):
 
 # ==================== Email ====================
 def send_email_notification(to_email, subject, body):
-    sender_email = os.environ.get("SENDER_EMAIL")
-    sender_password = os.environ.get("SENDER_APP_PASSWORD")
+
+    sender_email = get_setting("SENDER_EMAIL", required=False)
+    sender_password = get_setting("SENDER_APP_PASSWORD", required=False)
+
     if not sender_email or not sender_password or not to_email:
         return
+
     try:
         msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = subject
         msg["From"] = sender_email
         msg["To"] = to_email
+
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, [to_email], msg.as_string())
+
         print(f"✉️ Email sent to {to_email}")
+
     except Exception as exc:
         print(f"❌ Error sending email: {exc}")
 
@@ -230,12 +274,17 @@ def notify_office_status_changes(office, previous_results, processed_results):
 
 
 def notify_developer_tech_failures(office, job_id, failures, stopped_early=False):
-    developer_email = os.environ.get("DEVELOPER_EMAIL")
+
+    developer_email = get_setting("DEVELOPER_EMAIL", required=False)
+
     if not developer_email or not failures:
         return
+
     title = "⚠️ أخطاء فنية أثناء تحديث حالات الطلاب"
+
     if stopped_early:
         title = "🛑 " + title + " (تم إيقاف المهمة مبكرًا)"
+
     lines = [
         title,
         f"المكتب: {office.get('name', '') if office else ''}",
@@ -244,8 +293,10 @@ def notify_developer_tech_failures(office, job_id, failures, stopped_early=False
         f"عدد الأخطاء الفنية: {len(failures)}",
         "",
     ]
+
     for i, failure in enumerate(failures[:100], start=1):
         lines.append(f"{i}. {failure['name']}: {failure['error']}")
+
     send_email_notification(developer_email, title, "\n".join(lines))
 
 
@@ -646,7 +697,8 @@ def main():
             print("Worker stopped manually.")
             break
         except Exception as exc:
-            print(f"Unexpected error in worker: {exc}")
+            print(f"❌ Unexpected error in worker: {type(exc).__name__}: {exc!r}")
+            traceback.print_exc()
             time.sleep(10)
 
 
