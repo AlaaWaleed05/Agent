@@ -516,7 +516,7 @@ file_bytes=None; filename=""; saved_link=get_saved_gsheet_link(office_id); sheet
 if source=="📂 رفع ملف Excel":
     uploaded = st.file_uploader(
         "ارفع ملف Excel",
-        type=["xlsx", "xls",csv],
+        type=["xlsx", "xls"],
         label_visibility="collapsed",
         key="excel_upload",
     )
