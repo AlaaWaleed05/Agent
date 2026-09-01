@@ -15,9 +15,10 @@ jobs:
           ref: main
       - run: git checkout d4b21f98035c742c374e641e4fa1cdf5d3c43f1e -- 'streamlit_app (7).py'
       - run: python scripts/live_progress_patch.py
+      - run: python scripts/fallback_email_patch.py
       - run: python -m py_compile 'streamlit_app (7).py'
       - run: git config user.name github-actions[bot]
       - run: git config user.email 41898282+github-actions[bot]@users.noreply.github.com
       - run: git add 'streamlit_app (7).py'
-      - run: git commit -m 'Restore app and apply live progress fix' || true
+      - run: git commit -m 'Restore app and apply live progress and fallback email fixes' || true
       - run: git push
