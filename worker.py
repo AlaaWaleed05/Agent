@@ -38,34 +38,23 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 
-
 # ==================== إعدادات ====================
 SITE_URL = "https://admission.study-in-egypt.gov.eg"
 LOGIN_URL = f"{SITE_URL}/login"
 INBOX_URL = f"{SITE_URL}/inbox"
-
 WAIT_TIME = 20
 JOB_POLL_INTERVAL_SECONDS = 25
 STUDENT_DELAY_MIN, STUDENT_DELAY_MAX = 5, 10
 
 FINAL_STATUSES = {
-    "مقبول نهائي",
-    "قبول نهائي",
-    "تم الرفض",
-    "مرفوض نهائيًا",
-    "مرفوض نهائيا",
-    "مرفوض",
-    "خالص",
+    "مقبول نهائي", "قبول نهائي", "تم الرفض", "مرفوض نهائيًا",
+    "مرفوض نهائيا", "مرفوض", "خالص",
 }
-
 TECH_FAILURE_STATUS = "خطأ فني في الفحص"
 CONSECUTIVE_TECH_FAILURE_LIMIT = 5
-
 WORKER_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
 
-
 # ==================== Supabase ====================
-
 def get_supabase() -> Client:
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -91,53 +80,19 @@ def decrypt_student_password(encrypted_password):
 
 
 # ==================== Supabase helpers ====================
-
 def claim_next_pending_job():
-    """يمسك أول pending job بشكل آمن نسبيًا عن طريق update مشروط.
-    لو Worker تاني سبقه، الـ update هيرجع من غير row ونكمل ندور."""
-    jobs = (
-        db.table("jobs")
-        .select("*")
-        .eq("status", "pending")
-        .order("created_at")
-        .limit(20)
-        .execute()
-        .data
-        or []
-    )
+    """يمسك Job واحدة فقط بطريقة atomic عن طريق PostgreSQL RPC.
 
-    for job in jobs:
-        job_id = str(job.get("id", "")).strip()
-        if not job_id:
-            continue
-
-        claimed = (
-            db.table("jobs")
-            .update({
-                "status": "processing",
-                "claimed_by": WORKER_ID,
-                "started_at": now_iso(),
-                "error": None,
-            })
-            .eq("id", job_id)
-            .eq("status", "pending")
-            .select("*")
-            .execute()
-            .data
-            or []
-        )
-
-        if not claimed:
-            continue
-
-        db.table("job_claims").insert({
-            "job_id": job_id,
-            "worker_id": WORKER_ID,
-        }).execute()
-
-        return claimed[0]
-
-    return None
+    الـRPC نفسها بتعمل SELECT ... FOR UPDATE SKIP LOCKED ثم تغيّر الحالة من
+    pending إلى processing في نفس المعاملة، وبالتالي تشغيل 5 Workers في نفس
+    الوقت ما يخليهمش يمسكوا نفس الـjob.
+    """
+    result = db.rpc(
+        "claim_next_job",
+        {"p_worker_id": WORKER_ID},
+    ).execute()
+    rows = result.data or []
+    return rows[0] if rows else None
 
 
 def set_job_status(job_id, status, error=None, final_drive_file_id=None):
@@ -150,7 +105,6 @@ def set_job_status(job_id, status, error=None, final_drive_file_id=None):
         payload["error"] = str(error)[:1000]
     if final_drive_file_id:
         payload["final_drive_file_id"] = final_drive_file_id
-
     db.table("jobs").update(payload).eq("id", job_id).execute()
 
 
@@ -171,8 +125,7 @@ def get_office(office_id):
         .eq("id", office_id)
         .limit(1)
         .execute()
-        .data
-        or []
+        .data or []
     )
     return rows[0] if rows else None
 
@@ -183,12 +136,9 @@ def get_students_for_job(job):
         .select("*")
         .eq("office_id", job["office_id"])
     )
-
     if job.get("data_source_id"):
         query = query.eq("data_source_id", job["data_source_id"])
-
-    rows = query.order("source_row_number").execute().data or []
-    return rows
+    return query.order("source_row_number").execute().data or []
 
 
 def get_previous_results(job):
@@ -201,10 +151,11 @@ def get_previous_results(job):
 
 
 def update_student_status(student_id, status):
+    now = now_iso()
     db.table("student_records").update({
         "application_status": str(status),
-        "status_updated_at": now_iso(),
-        "updated_at": now_iso(),
+        "status_updated_at": now,
+        "updated_at": now,
     }).eq("id", student_id).execute()
 
 
@@ -241,14 +192,11 @@ def get_status_changes(previous_results, processed_results):
 
 
 # ==================== Email ====================
-
 def send_email_notification(to_email, subject, body):
     sender_email = os.environ.get("SENDER_EMAIL")
     sender_password = os.environ.get("SENDER_APP_PASSWORD")
-
     if not sender_email or not sender_password or not to_email:
         return
-
     try:
         msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = subject
@@ -265,18 +213,14 @@ def send_email_notification(to_email, subject, body):
 def notify_office_status_changes(office, previous_results, processed_results):
     if not office:
         return
-
     changes = get_status_changes(previous_results, processed_results)
     if not changes or not office.get("email"):
         return
-
     lines = [f"تحديث حالات الطلاب - {office.get('name', '')}", ""]
     for idx, change in enumerate(changes[:200], start=1):
         lines.append(f"{idx}. {change['name']} - {change['new_status']}")
-
     if len(changes) > 200:
         lines.append(f"...و{len(changes) - 200} طالب/ة تاني اتغيرت حالتهم")
-
     lines += ["", f"إجمالي التغييرات: {len(changes)}"]
     send_email_notification(
         office["email"],
@@ -289,11 +233,9 @@ def notify_developer_tech_failures(office, job_id, failures, stopped_early=False
     developer_email = os.environ.get("DEVELOPER_EMAIL")
     if not developer_email or not failures:
         return
-
     title = "⚠️ أخطاء فنية أثناء تحديث حالات الطلاب"
     if stopped_early:
         title = "🛑 " + title + " (تم إيقاف المهمة مبكرًا)"
-
     lines = [
         title,
         f"المكتب: {office.get('name', '') if office else ''}",
@@ -302,15 +244,12 @@ def notify_developer_tech_failures(office, job_id, failures, stopped_early=False
         f"عدد الأخطاء الفنية: {len(failures)}",
         "",
     ]
-
     for i, failure in enumerate(failures[:100], start=1):
         lines.append(f"{i}. {failure['name']}: {failure['error']}")
-
     send_email_notification(developer_email, title, "\n".join(lines))
 
 
-# ==================== Selenium: نفس Chrome flow القديم ====================
-
+# ==================== Selenium: نفس Chrome flow ====================
 def human_type(element, text):
     element.clear()
     time.sleep(1)
@@ -331,11 +270,8 @@ def setup_browser():
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_argument("--start-maximized")
-
     driver = webdriver.Chrome(options=options)
-    driver.execute_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return driver
 
 
@@ -345,9 +281,7 @@ def clear_session(driver):
     except Exception:
         pass
     try:
-        driver.execute_script(
-            "window.localStorage.clear(); window.sessionStorage.clear();"
-        )
+        driver.execute_script("window.localStorage.clear(); window.sessionStorage.clear();")
     except Exception:
         pass
 
@@ -357,50 +291,35 @@ def selenium_login(driver, email, password):
         driver.get(LOGIN_URL)
         clear_session(driver)
         driver.get(LOGIN_URL)
-
         wait = WebDriverWait(driver, WAIT_TIME)
         slow_wait(3, "Loading login page")
-
         email_field = wait.until(EC.presence_of_element_located(
             (By.CSS_SELECTOR, "input[type='email'], input[name='email']")
         ))
         email_field.click()
         slow_wait(3, "Waiting before email")
         human_type(email_field, email)
-
-        password_field = driver.find_element(
-            By.CSS_SELECTOR, "input[type='password']"
-        )
+        password_field = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
         password_field.click()
         slow_wait(3, "Waiting before password")
         human_type(password_field, password)
-
         slow_wait(2, "Waiting before click")
-        login_btn = driver.find_element(
-            By.CSS_SELECTOR, "button[type='submit'], input[type='submit']"
-        )
+        login_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
         login_btn.click()
-
         login_success = False
         for _ in range(15):
             time.sleep(1)
             try:
-                driver.find_element(
-                    By.CSS_SELECTOR,
-                    "input[type='email'], input[name='email']"
-                )
+                driver.find_element(By.CSS_SELECTOR, "input[type='email'], input[name='email']")
                 still_has_email_field = True
             except Exception:
                 still_has_email_field = False
-
             if not still_has_email_field or "login" not in driver.current_url:
                 login_success = True
                 break
-
         if not login_success:
             return False, False, "فشل تسجيل الدخول"
         return True, False, None
-
     except (TimeoutException, WebDriverException) as exc:
         return False, True, f"خطأ فني في صفحة اللوجين: {exc}"
     except Exception as exc:
@@ -416,7 +335,6 @@ def selenium_go_to_inbox(driver):
             ))
             menu_btn.click()
             slow_wait(0.8, "Waiting for menu to open")
-
             my_apps = wait.until(EC.element_to_be_clickable(
                 (By.XPATH, "//*[contains(text(), 'طلباتي')]")
             ))
@@ -426,7 +344,6 @@ def selenium_go_to_inbox(driver):
             driver.get(INBOX_URL)
             slow_wait(1)
         return True, None
-
     except (TimeoutException, WebDriverException) as exc:
         return False, f"خطأ فني في الوصول لصفحة الطلبات: {exc}"
 
@@ -436,43 +353,30 @@ def selenium_get_status(driver):
         wait = WebDriverWait(driver, WAIT_TIME)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table")))
         slow_wait(2)
-
-        headers = driver.find_elements(
-            By.CSS_SELECTOR, "table thead th, table tr th"
-        )
+        headers = driver.find_elements(By.CSS_SELECTOR, "table thead th, table tr th")
         header_texts = [h.text.strip() for h in headers]
-
         status_index = None
         for i, header in enumerate(header_texts):
             if header in ("حالة الطلب", "الحالة"):
                 status_index = i
                 break
-
         if status_index is None:
             for i, header in enumerate(header_texts):
                 if "حالة" in header and "اسم" not in header and "خدمة" not in header:
                     status_index = i
                     break
-
         rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
         all_requests = []
-
         for row in rows:
             cells = row.find_elements(By.CSS_SELECTOR, "td")
             if not cells:
                 continue
-            if status_index is not None and status_index < len(cells):
-                status = cells[status_index].text.strip()
-            else:
-                status = ""
+            status = cells[status_index].text.strip() if status_index is not None and status_index < len(cells) else ""
             if status:
                 all_requests.append(status)
-
         if not all_requests:
             return "مفيش طلبات", False, None
-
         return all_requests[0], False, None
-
     except (TimeoutException, WebDriverException) as exc:
         return "", True, f"خطأ فني في جلب حالة الطلب: {exc}"
     except Exception as exc:
@@ -484,12 +388,10 @@ def selenium_logout(driver):
         wait = WebDriverWait(driver, WAIT_TIME)
         slow_wait(2)
         user_menu = wait.until(EC.element_to_be_clickable(
-            (By.CSS_SELECTOR,
-             "[class*='user'], [class*='profile'], [class*='avatar'], [class*='account']")
+            (By.CSS_SELECTOR, "[class*='user'], [class*='profile'], [class*='avatar'], [class*='account']")
         ))
         user_menu.click()
         slow_wait(2)
-
         logout_btn = wait.until(EC.element_to_be_clickable(
             (By.XPATH, "//*[contains(text(), 'تسجيل خروج') or contains(text(), 'خروج')]")
         ))
@@ -510,7 +412,6 @@ def restart_browser(driver):
 
 
 # ==================== Core ====================
-
 def process_job(job):
     job_id = str(job["id"])
     office = get_office(job.get("office_id"))
@@ -540,7 +441,6 @@ def process_job(job):
 
     processing_order = pending_students[:]
     random.shuffle(processing_order)
-
     total = len(processing_order)
     processed_results = []
     tech_failures = []
@@ -556,19 +456,16 @@ def process_job(job):
         for idx, student in enumerate(processing_order):
             email = str(student["login_identifier"]).strip()
             display_name = str(student.get("student_name") or email).strip()
-
             try:
                 password = decrypt_student_password(student["encrypted_password"])
             except Exception as exc:
                 status = TECH_FAILURE_STATUS
-                error_msg = f"تعذر فك تشفير باسورد الطالب: {exc}"
                 update_student_status(student["id"], status)
                 append_progress(job_id, idx + 1, total, display_name, status)
-                tech_failures.append({"name": display_name, "error": error_msg})
+                tech_failures.append({"name": display_name, "error": str(exc)})
                 continue
 
-            print(f"\n👤 [{idx + 1}/{total}] {display_name}")
-
+            print(f"\n👤 [{idx+1}/{total}] {display_name}")
             current_status = None
             is_tech_error = False
             error_msg = None
@@ -577,11 +474,10 @@ def process_job(job):
 
             try:
                 ok, is_tech_error, error_msg = selenium_login(driver, email, password)
-
                 if not ok and not is_tech_error:
                     current_status = "فشل تسجيل الدخول"
                     login_confirmed_failed = True
-                elif not ok:
+                elif not ok and is_tech_error:
                     current_status = TECH_FAILURE_STATUS
                 else:
                     ok2, err2 = selenium_go_to_inbox(driver)
@@ -592,13 +488,11 @@ def process_job(job):
                     else:
                         status_text, is_tech_error, error_msg = selenium_get_status(driver)
                         current_status = TECH_FAILURE_STATUS if is_tech_error else status_text
-
             except WebDriverException as exc:
                 is_tech_error = True
                 error_msg = f"الكروم اتقفل/وقع أثناء المعالجة: {exc}"
                 current_status = TECH_FAILURE_STATUS
                 browser_crashed = True
-
             finally:
                 if browser_crashed:
                     driver = restart_browser(driver)
@@ -607,53 +501,32 @@ def process_job(job):
                 else:
                     selenium_logout(driver)
 
-            update_student_status(student["id"], current_status)
-            append_progress(job_id, idx + 1, total, display_name, current_status)
-
-            processed_results.append({
-                "name": display_name,
-                "status": str(current_status),
-            })
-
             if is_tech_error:
                 consecutive_tech_failures += 1
-                tech_failures.append({
-                    "name": display_name,
-                    "error": error_msg or "خطأ غير معروف",
-                })
+                tech_failures.append({"name": display_name, "error": error_msg or "خطأ غير معروف"})
                 tech_retry_list.append({"student": student})
                 print(f"    ⚠️ Technical error: {error_msg}")
             else:
                 consecutive_tech_failures = 0
                 print(f"    ✅ Status: {current_status}")
 
+            update_student_status(student["id"], current_status)
+            append_progress(job_id, idx + 1, total, display_name, current_status)
+            processed_results.append({"name": display_name, "status": str(current_status)})
+
             if consecutive_tech_failures >= CONSECUTIVE_TECH_FAILURE_LIMIT:
-                # نحافظ على سلوك النسخة القديمة: تسجيل المشكلة والاستمرار.
-                # الـ limit يستخدم للتنبيه فقط هنا.
-                print(
-                    f"    ⚠️ {CONSECUTIVE_TECH_FAILURE_LIMIT} technical failures in a row."
-                )
+                print(f"    ⚠️ {CONSECUTIVE_TECH_FAILURE_LIMIT} technical failures in a row.")
 
             if idx < total - 1:
-                slow_wait(
-                    random.uniform(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX),
-                    "Pause before next student",
-                )
+                slow_wait(random.uniform(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX), "Pause before next student")
 
-        # ==================== Retry technical failures ====================
         if tech_retry_list:
             print(f"\n🔁 Retrying {len(tech_retry_list)} technical-error student(s)...")
-
             for retry_item in tech_retry_list:
                 student = retry_item["student"]
                 display_name = str(student.get("student_name") or student.get("login_identifier"))
                 email = str(student["login_identifier"]).strip()
-
-                slow_wait(
-                    random.uniform(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX),
-                    "Pause before retry",
-                )
-
+                slow_wait(random.uniform(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX), "Pause before retry")
                 try:
                     password = decrypt_student_password(student["encrypted_password"])
                 except Exception as exc:
@@ -667,9 +540,7 @@ def process_job(job):
                 retry_browser_crashed = False
 
                 try:
-                    ok, retry_is_tech_error, retry_error_msg = selenium_login(
-                        driver, email, password
-                    )
+                    ok, retry_is_tech_error, retry_error_msg = selenium_login(driver, email, password)
                     if not ok and not retry_is_tech_error:
                         retry_status = "فشل تسجيل الدخول"
                         retry_login_failed = True
@@ -684,13 +555,11 @@ def process_job(job):
                         else:
                             status_text, retry_is_tech_error, retry_error_msg = selenium_get_status(driver)
                             retry_status = TECH_FAILURE_STATUS if retry_is_tech_error else status_text
-
                 except WebDriverException as exc:
                     retry_is_tech_error = True
                     retry_error_msg = f"الكروم اتقفل/وقع أثناء إعادة المحاولة: {exc}"
                     retry_status = TECH_FAILURE_STATUS
                     retry_browser_crashed = True
-
                 finally:
                     if retry_browser_crashed:
                         driver = restart_browser(driver)
@@ -700,7 +569,6 @@ def process_job(job):
                         selenium_logout(driver)
 
                 update_student_status(student["id"], retry_status)
-
                 for result in processed_results:
                     if result["name"] == display_name:
                         result["status"] = str(retry_status)
@@ -711,16 +579,13 @@ def process_job(job):
                 else:
                     print(f"    ✅ Status after retry: {retry_status}")
 
-        # Remove recovered technical errors from developer email list.
-        tech_failures = [
-            failure
-            for failure in tech_failures
-            if any(
-                result["name"] == failure["name"]
-                and result["status"] == TECH_FAILURE_STATUS
-                for result in processed_results
-            )
-        ]
+            tech_failures = [
+                failure for failure in tech_failures
+                if any(
+                    result["name"] == failure["name"] and result["status"] == TECH_FAILURE_STATUS
+                    for result in processed_results
+                )
+            ]
 
     finally:
         try:
@@ -741,6 +606,7 @@ def process_job(job):
             "job_id": job_id,
             "students_processed": len(processed_results),
             "technical_errors": len(tech_failures),
+            "worker_id": WORKER_ID,
         },
         data_source_id=job.get("data_source_id"),
     )
@@ -755,17 +621,12 @@ def process_job(job):
         set_job_status(job_id, "done")
 
     if tech_failures:
-        notify_developer_tech_failures(
-            office, job_id, tech_failures, stopped_early=stopped_early
-        )
+        notify_developer_tech_failures(office, job_id, tech_failures, stopped_early=stopped_early)
 
-    print(
-        f"=== Job {job_id} finished ({len(processed_results)}/{total} students) ==="
-    )
+    print(f"=== Job {job_id} finished ({len(processed_results)}/{total} students) ===")
 
 
 # ==================== Main loop ====================
-
 def main():
     print(f"Worker (Selenium + Supabase) running... ID: {WORKER_ID}")
     print(f"Checking for new Supabase jobs every ~{JOB_POLL_INTERVAL_SECONDS} seconds.")
@@ -777,13 +638,10 @@ def main():
             if job:
                 process_job(job)
             else:
-                time.sleep(
-                    random.uniform(
-                        JOB_POLL_INTERVAL_SECONDS * 0.7,
-                        JOB_POLL_INTERVAL_SECONDS * 1.3,
-                    )
-                )
-
+                time.sleep(random.uniform(
+                    JOB_POLL_INTERVAL_SECONDS * 0.7,
+                    JOB_POLL_INTERVAL_SECONDS * 1.3,
+                ))
         except KeyboardInterrupt:
             print("Worker stopped manually.")
             break
