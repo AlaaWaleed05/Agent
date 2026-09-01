@@ -45,7 +45,9 @@ LOGIN_URL = f"{SITE_URL}/login"
 INBOX_URL = f"{SITE_URL}/inbox"
 WAIT_TIME = 20
 JOB_POLL_INTERVAL_SECONDS = 25
-STUDENT_DELAY_MIN, STUDENT_DELAY_MAX = 5, 10
+# Short, varied pauses between students. These are intentionally bounded so
+# a large batch does not accumulate unnecessary idle time.
+STUDENT_DELAY_MIN, STUDENT_DELAY_MAX = 4, 8
 
 FINAL_STATUSES = {
     "مقبول نهائي", "قبول نهائي", "تم الرفض", "مرفوض نهائيًا",
@@ -301,12 +303,19 @@ def notify_developer_tech_failures(office, job_id, failures, stopped_early=False
 
 
 # ==================== Selenium: نفس Chrome flow ====================
+def human_delay(min_seconds, max_seconds, msg=""):
+    seconds = random.uniform(min_seconds, max_seconds)
+    if msg:
+        print(f"    ⏳ {msg} ({seconds:.1f}s)...")
+    time.sleep(seconds)
+
+
 def human_type(element, text):
     element.clear()
-    time.sleep(1)
+    human_delay(0.3, 0.7)
     for char in str(text):
         element.send_keys(char)
-        time.sleep(random.uniform(0.15, 0.4))
+        time.sleep(random.uniform(0.05, 0.15))
 
 
 def slow_wait(seconds, msg=""):
@@ -343,19 +352,25 @@ def selenium_login(driver, email, password):
         clear_session(driver)
         driver.get(LOGIN_URL)
         wait = WebDriverWait(driver, WAIT_TIME)
-        slow_wait(3, "Loading login page")
+        human_delay(0.8, 1.5, "Loading login page")
         email_field = wait.until(EC.presence_of_element_located(
             (By.CSS_SELECTOR, "input[type='email'], input[name='email']")
         ))
         email_field.click()
-        slow_wait(3, "Waiting before email")
+        human_delay(0.5, 1.2, "Waiting before email")
         human_type(email_field, email)
-        password_field = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+        password_field = wait.until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']"))
+        )
         password_field.click()
-        slow_wait(3, "Waiting before password")
+        human_delay(0.5, 1.3, "Waiting before password")
         human_type(password_field, password)
-        slow_wait(2, "Waiting before click")
-        login_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
+        human_delay(0.7, 1.4, "Waiting before click")
+        login_btn = wait.until(
+            EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
+            )
+        )
         login_btn.click()
         login_success = False
         for _ in range(15):
@@ -385,15 +400,15 @@ def selenium_go_to_inbox(driver):
                 (By.XPATH, "//*[contains(text(), 'القائمة') or contains(@class,'menu')]")
             ))
             menu_btn.click()
-            slow_wait(0.8, "Waiting for menu to open")
+            human_delay(0.5, 1.2, "Waiting for menu to open")
             my_apps = wait.until(EC.element_to_be_clickable(
                 (By.XPATH, "//*[contains(text(), 'طلباتي')]")
             ))
             my_apps.click()
-            slow_wait(1, "Waiting for requests page")
+            human_delay(0.7, 1.5, "Waiting for requests page")
         except Exception:
             driver.get(INBOX_URL)
-            slow_wait(1)
+            human_delay(0.7, 1.5, "Waiting for requests page")
         return True, None
     except (TimeoutException, WebDriverException) as exc:
         return False, f"خطأ فني في الوصول لصفحة الطلبات: {exc}"
@@ -403,7 +418,7 @@ def selenium_get_status(driver):
     try:
         wait = WebDriverWait(driver, WAIT_TIME)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table")))
-        slow_wait(2)
+        human_delay(0.5, 1.2, "Reading application status")
         headers = driver.find_elements(By.CSS_SELECTOR, "table thead th, table tr th")
         header_texts = [h.text.strip() for h in headers]
         status_index = None
@@ -435,23 +450,26 @@ def selenium_get_status(driver):
 
 
 def selenium_logout(driver):
+    success = False
     try:
         wait = WebDriverWait(driver, WAIT_TIME)
-        slow_wait(2)
+        human_delay(0.8, 1.8, "Preparing logout")
         user_menu = wait.until(EC.element_to_be_clickable(
             (By.CSS_SELECTOR, "[class*='user'], [class*='profile'], [class*='avatar'], [class*='account']")
         ))
         user_menu.click()
-        slow_wait(2)
+        human_delay(0.5, 1.2, "Opening account menu")
         logout_btn = wait.until(EC.element_to_be_clickable(
             (By.XPATH, "//*[contains(text(), 'تسجيل خروج') or contains(text(), 'خروج')]")
         ))
         logout_btn.click()
-        slow_wait(2)
-    except Exception:
-        pass
+        human_delay(0.7, 1.5, "Finishing logout")
+        success = True
+    except Exception as exc:
+        print(f"    ⚠️ Logout failed: {exc}")
     finally:
         clear_session(driver)
+    return success
 
 
 def restart_browser(driver):
@@ -545,16 +563,16 @@ def process_job(job):
                 current_status = TECH_FAILURE_STATUS
                 browser_crashed = True
             finally:
-                
                 if login_confirmed_failed:
-                    
                     clear_session(driver)
                 else:
-                    
-                    selenium_logout(driver)
+                    logout_ok = selenium_logout(driver)
+                    if not logout_ok:
+                        browser_crashed = True
 
-    # أي technical error من Selenium ممكن يكون خلّى الـsession غير صالحة،
-    # لذلك نبدأ بمتصفح جديد قبل الطالب التالي.
+                # A Selenium technical error can leave the current browser
+                # session unusable even when the exception was caught inside
+                # selenium_login()/selenium_get_status(). Start clean.
                 if browser_crashed or is_tech_error:
                     driver = restart_browser(driver)
 
@@ -577,7 +595,7 @@ def process_job(job):
                 print(f"    ⚠️ {CONSECUTIVE_TECH_FAILURE_LIMIT} technical failures in a row.")
 
             if idx < total - 1:
-                slow_wait(random.uniform(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX), "Pause before next student")
+                human_delay(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX, "Pause before next student")
 
         if tech_retry_list:
             print(f"\n🔁 Retrying {len(tech_retry_list)} technical-error student(s)...")
@@ -585,7 +603,7 @@ def process_job(job):
                 student = retry_item["student"]
                 display_name = str(student.get("student_name") or student.get("login_identifier"))
                 email = str(student["login_identifier"]).strip()
-                slow_wait(random.uniform(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX), "Pause before retry")
+                human_delay(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX, "Pause before retry")
                 try:
                     password = decrypt_student_password(student["encrypted_password"])
                 except Exception as exc:
@@ -620,12 +638,12 @@ def process_job(job):
                     retry_status = TECH_FAILURE_STATUS
                     retry_browser_crashed = True
                 finally:
-                    
                     if retry_login_failed:
-                        
                         clear_session(driver)
                     else:
-                        selenium_logout(driver)
+                        logout_ok = selenium_logout(driver)
+                        if not logout_ok:
+                            retry_browser_crashed = True
 
                     if retry_browser_crashed or retry_is_tech_error:
                         driver = restart_browser(driver)
