@@ -232,7 +232,8 @@ def get_students(office_id, search=""):
     rows=[item[1] for item in latest.values()]
     rows=sorted(rows,key=lambda r:str(r.get("student_name") or "").lower())
     if search.strip():
-        q=search.strip().lower(); rows=[r for r in rows if q in str(r.get("student_name","")).lower()]
+        q=search.strip().lower()
+        rows=[r for r in rows if q in str(r.get("student_name","")).lower()]
     return rows
 
 def status_class(status):
@@ -349,12 +350,15 @@ def _run_legacy_api_fallback(job):
         return
 
     total = len(students)
-    failed = 0
     live_table = st.empty()
     live_rows = []
-    for index, student in enumerate(students, 1):
+    technical_failures = []
+
+    def check_one(student):
         session = None
         status = "خطأ فني في الفحص"
+        technical = False
+        error_text = ""
         try:
             session, token, error = _legacy_api_login(
                 student["login_identifier"],
@@ -362,43 +366,82 @@ def _run_legacy_api_fallback(job):
             )
             if error:
                 status = "فشل تسجيل الدخول"
-                failed += 1
             else:
                 status = _legacy_api_get_status(session, token)
-                if str(status).startswith("خطأ"):
-                    failed += 1
-        except Exception:
-            failed += 1
+                technical = str(status).startswith("خطأ")
+                if technical:
+                    status = "خطأ فني في الفحص"
+        except Exception as exc:
+            technical = True
+            error_text = str(exc)
+            status = "خطأ فني في الفحص"
         finally:
             _legacy_api_logout(session)
+        return status, technical, error_text
 
+    def save_result(student, status, index_for_progress):
         stamp = now_iso()
-        db().table("student_records").update({
-            "application_status": status,
-            "status_updated_at": stamp,
-            "updated_at": stamp,
-        }).eq("id", student["id"]).execute()
+        student_id = student["id"]
+        # DB failure for one student must not stop the remaining students.
+        try:
+            db().table("student_records").update({
+                "application_status": status,
+                "status_updated_at": stamp,
+                "updated_at": stamp,
+            }).eq("id", student_id).execute()
+        except Exception as exc:
+            print(f"Student status save error for {student_id}: {exc}")
         student_display = student.get("student_name") or student.get("login_identifier")
-        db().table("job_progress").insert({
-            "job_id": job["id"],
-            "student_index": index,
-            "total": total,
-            "student_name": student_display,
-            "status": status,
-        }).execute()
+        try:
+            db().table("job_progress").insert({
+                "job_id": job["id"],
+                "student_index": index_for_progress,
+                "total": total,
+                "student_name": student_display,
+                "status": status,
+            }).execute()
+        except Exception as exc:
+            print(f"Progress save error for {student_id}: {exc}")
         live_rows.append({"اسم الطالب": student_display, "الحالة الجديدة": status})
-        live_table.dataframe(
-            pd.DataFrame(live_rows),
-            use_container_width=True,
-            hide_index=True,
-        )
+        live_table.dataframe(pd.DataFrame(live_rows), use_container_width=True, hide_index=True)
+
+    # الجولة الأولى: كل الطلاب، من غير ما طالب واحد يوقف الباقي.
+    for index, student in enumerate(students, 1):
+        status, technical, error_text = check_one(student)
+        if technical:
+            technical_failures.append({"student": student, "error": error_text or status})
+        save_result(student, status, index)
+
+    # الجولة الثانية: بعد انتهاء كل الطلاب، أعد فحص كل خطأ فني مرة واحدة.
+    if technical_failures:
+        live_table.markdown("**🔁 إعادة فحص الطلاب الذين ظهر لهم خطأ فني...**")
+        for retry_index, item in enumerate(technical_failures, 1):
+            student = item["student"]
+            status, technical, error_text = check_one(student)
+            save_result(student, status, total + retry_index)
+
+    remaining_tech = []
+    for item in technical_failures:
+        student_id = item["student"]["id"]
+        try:
+            row = (
+                db().table("student_records")
+                .select("application_status")
+                .eq("id", student_id)
+                .limit(1)
+                .execute().data or []
+            )
+            if row and str(row[0].get("application_status") or "").strip() == "خطأ فني في الفحص":
+                remaining_tech.append(item)
+        except Exception:
+            # Keep the failure list for logging if the verification query itself fails.
+            remaining_tech.append(item)
 
     db().table("jobs").update({
-        "status": "failed" if failed >= total else "done",
+        "status": "failed" if len(remaining_tech) >= total else "done",
         "finished_at": now_iso(),
-        "error": "فشل فني في كل الطلاب" if failed >= total else None,
+        "error": "فشل فني في كل الطلاب" if len(remaining_tech) >= total else None,
     }).eq("id", job["id"]).execute()
-
 
 def wait_for_worker_or_legacy_fallback(job_id):
     deadline = time.monotonic() + WORKER_WAIT_SECONDS
