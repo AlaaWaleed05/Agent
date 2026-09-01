@@ -13,13 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Apply Aivora UI fixes
+      - name: Apply Aivora legacy API fallback
         shell: bash
         run: |
-          python -c "from pathlib import Path; p=Path('streamlit_app (7).py'); s=p.read_text(encoding='utf-8'); s=s.replace('if st.button(\"تسجيل الخروج\",key=\"logout_main\"): st.session_state.clear(); st.rerun()\\n\\n','',1); s=s.replace('                if st.button(\"إخفاء المهمة\",key=\"hide_done\"): st.session_state.active_job_id=None; st.session_state.update_locked=False; st.rerun()\\n','',1); s=s.replace('                if st.button(\"إخفاء المهمة\",key=\"hide_failed\"): st.session_state.active_job_id=None; st.session_state.update_locked=False; st.rerun()\\n','',1); s=s.replace('log_activity(office_id,\"فتح لوحة المكتب\")','if st.button(\"تسجيل الخروج\",key=\"logout_main\"): st.session_state.clear(); st.rerun()\\n\\nlog_activity(office_id,\"فتح لوحة المكتب\")',1); p.write_text(s,encoding='utf-8')"
+          python scripts/aivora_fallback_patch.py
           python -m py_compile 'streamlit_app (7).py'
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add 'streamlit_app (7).py'
-          git commit -m 'Move logout and keep update lock' || true
+          git commit -m 'Add 30 second Worker fallback' || true
           git push
