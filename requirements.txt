@@ -9,3 +9,4 @@ reportlab
 supabase
 cryptography
 selenium
+bcrypt
