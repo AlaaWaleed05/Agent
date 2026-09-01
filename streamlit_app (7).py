@@ -293,8 +293,6 @@ _hour=datetime.now().hour; _greeting="صباح الخير" if _hour<12 else "م�
 
 st.markdown(f"<div class='topbar'><div class='brand'><div class='brand-icon'>✨</div><div><div class='brand-title'>Aivora</div><div class='brand-sub'>Your Smarter Support for Every Student's Application</div></div></div><div style='font-size:13px;color:#6b7280;'>نظام متابعة المكاتب</div></div>",unsafe_allow_html=True)
 
-if st.button("تسجيل الخروج",key="logout_main"): st.session_state.clear(); st.rerun()
-
 st.markdown(f"<div class='hero'><div class='hero-kicker'>{_greeting} 👋</div><div class='hero-title'>أهلاً بيك، <strong>{office.get('name','')}</strong></div><div class='hero-desc'>تابع طلبات طلابك وحدّث الحالات من مكان واحد.</div></div>",unsafe_allow_html=True)
 
 students=get_students(office_id)
@@ -387,10 +385,8 @@ if file_bytes:
             elif status=="pending": st.info("المهمة في الانتظار حتى يستلمها الـ Worker...")
             if status=="done":
                 st.session_state.pending_file_bytes=None; st.session_state.pending_filename=""; st.markdown('<div class="success-box"><div class="success-title">اكتمل التحديث 🎉</div><div class="success-desc">تمت معالجة الطلبات عن طريق الجهاز المحلي.</div></div>',unsafe_allow_html=True)
-                if st.button("إخفاء المهمة",key="hide_done"): st.session_state.active_job_id=None; st.session_state.update_locked=False; st.rerun()
             elif status=="failed":
                 st.error(job.get("error") or "المهمة فشلت.")
-                if st.button("إخفاء المهمة",key="hide_failed"): st.session_state.active_job_id=None; st.session_state.update_locked=False; st.rerun()
             elif status=="processing": time.sleep(2); st.rerun()
     st.markdown('</div>',unsafe_allow_html=True)
 
@@ -406,5 +402,7 @@ if search_query:
             st.markdown(f'<div class="result-card"><div class="result-name">👤 {s.get("student_name","")}</div><div class="result-status"><span class="status-badge {status_class(status)}">{status}</span></div></div>',unsafe_allow_html=True)
     else: st.info("مفيش طالب بالاسم ده.")
 st.markdown('</div>',unsafe_allow_html=True)
+
+if st.button("تسجيل الخروج",key="logout_main"): st.session_state.clear(); st.rerun()
 
 log_activity(office_id,"فتح لوحة المكتب")
