@@ -545,17 +545,25 @@ def process_job(job):
                 current_status = TECH_FAILURE_STATUS
                 browser_crashed = True
             finally:
-                if browser_crashed:
-                    driver = restart_browser(driver)
-                elif login_confirmed_failed:
+                
+                if login_confirmed_failed:
+                    
                     clear_session(driver)
                 else:
+                    
                     selenium_logout(driver)
+
+    # أي technical error من Selenium ممكن يكون خلّى الـsession غير صالحة،
+    # لذلك نبدأ بمتصفح جديد قبل الطالب التالي.
+                if browser_crashed or is_tech_error:
+                    driver = restart_browser(driver)
 
             if is_tech_error:
                 consecutive_tech_failures += 1
                 tech_failures.append({"name": display_name, "error": error_msg or "خطأ غير معروف"})
-                tech_retry_list.append({"student": student})
+                tech_retry_list.append({
+                      "student": student,
+                      "index": idx + 1,})
                 print(f"    ⚠️ Technical error: {error_msg}")
             else:
                 consecutive_tech_failures = 0
@@ -612,14 +620,23 @@ def process_job(job):
                     retry_status = TECH_FAILURE_STATUS
                     retry_browser_crashed = True
                 finally:
-                    if retry_browser_crashed:
-                        driver = restart_browser(driver)
-                    elif retry_login_failed:
+                    
+                    if retry_login_failed:
+                        
                         clear_session(driver)
                     else:
                         selenium_logout(driver)
 
+                    if retry_browser_crashed or retry_is_tech_error:
+                        driver = restart_browser(driver)
+
                 update_student_status(student["id"], retry_status)
+                append_progress(
+                 job_id,
+                 retry_item["index"],
+                 total,
+                 display_name,
+                 retry_status,)
                 for result in processed_results:
                     if result["name"] == display_name:
                         result["status"] = str(retry_status)
