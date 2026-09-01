@@ -12,6 +12,7 @@ import json
 import os
 import re
 import time
+import threading
 
 import requests
 from datetime import datetime, timezone
@@ -350,16 +351,7 @@ def _run_legacy_api_fallback(job):
         return
 
     total = len(students)
-    live_table = st.empty()
-    live_rows = []
     technical_failures = []
-    previous_results = {
-        str(row.get("student_name") or row.get("login_identifier") or "").strip():
-        str(row.get("application_status") or "").strip()
-        for row in students
-        if str(row.get("student_name") or row.get("login_identifier") or "").strip()
-    }
-    processed_results = []
 
     def check_one(student):
         session = None
@@ -409,9 +401,6 @@ def _run_legacy_api_fallback(job):
             }).execute()
         except Exception as exc:
             print(f"Progress save error for {student_id}: {exc}")
-        live_rows.append({"اسم الطالب": student_display, "الحالة الجديدة": status})
-        processed_results.append({"name": str(student_display).strip(), "status": str(status)})
-        live_table.dataframe(pd.DataFrame(live_rows), use_container_width=True, hide_index=True)
 
     # الجولة الأولى: كل الطلاب، من غير ما طالب واحد يوقف الباقي.
     for index, student in enumerate(students, 1):
@@ -422,7 +411,6 @@ def _run_legacy_api_fallback(job):
 
     # الجولة الثانية: بعد انتهاء كل الطلاب، أعد فحص كل خطأ فني مرة واحدة.
     if technical_failures:
-        live_table.markdown("**🔁 إعادة فحص الطلاب الذين ظهر لهم خطأ فني...**")
         for retry_index, item in enumerate(technical_failures, 1):
             student = item["student"]
             status, technical, error_text = check_one(student)
@@ -445,13 +433,6 @@ def _run_legacy_api_fallback(job):
             # Keep the failure list for logging if the verification query itself fails.
             remaining_tech.append(item)
 
-    # نفس إشعار الـWorker: أرسل للمكتب فقط الطلاب الذين تغيّرت حالتهم.
-    try:
-        office = get_office(job.get("office_id"))
-        notify_office_status_changes(office, previous_results, processed_results)
-    except Exception as exc:
-        print(f"Could not send fallback status-change email: {exc}")
-
     db().table("jobs").update({
         "status": "failed" if len(remaining_tech) >= total else "done",
         "finished_at": now_iso(),
@@ -459,31 +440,27 @@ def _run_legacy_api_fallback(job):
     }).eq("id", job["id"]).execute()
 
 def wait_for_worker_or_legacy_fallback(job_id):
-    deadline = time.monotonic() + WORKER_WAIT_SECONDS
-    box = st.empty()
-    progress = st.progress(0.0)
-    while time.monotonic() < deadline:
-        job = get_job(job_id)
-        if not job:
-            progress.empty()
-            box.error("المهمة اختفت من Supabase.")
-            return "missing"
-        if str(job.get("status") or "pending") != "pending":
-            progress.empty()
-            return "worker"
-        elapsed = int(WORKER_WAIT_SECONDS - max(0, deadline - time.monotonic()))
-        remaining = max(0, WORKER_WAIT_SECONDS - elapsed)
-        box.info(f"بندور على الـ Worker... لو مش موجود، التحديث هيبدأ تلقائيًا بعد {remaining} ثانية.")
-        progress.progress(min(elapsed / WORKER_WAIT_SECONDS, 1.0))
+    deadline=time.monotonic()+WORKER_WAIT_SECONDS
+    while time.monotonic()<deadline:
+        job=get_job(job_id)
+        if not job: return "missing"
+        if str(job.get("status") or "pending")!="pending": return "worker"
         time.sleep(2)
-
-    claimed = _claim_fallback_job(job_id)
-    progress.empty()
+    claimed=_claim_fallback_job(job_id)
     if claimed:
-        box.warning("الـ Worker ما استلمش المهمة خلال 30 ثانية — Streamlit بدأ التحديث بالطريقة القديمة.")
         _run_legacy_api_fallback(claimed)
         return "fallback"
     return "worker"
+
+
+def _background_update_job(job_id):
+    try:
+        wait_for_worker_or_legacy_fallback(job_id)
+    except Exception as exc:
+        try:
+            db().table("jobs").update({"status":"failed","finished_at":now_iso(),"error":str(exc)[:1000]}).eq("id",job_id).execute()
+        except Exception as db_exc:
+            print(f"Background job save error: {db_exc}")
 
 # ==================== UI ====================
 st.set_page_config(page_title="Aivora - Agent", page_icon="✨", layout="wide", initial_sidebar_state="collapsed")
@@ -634,50 +611,52 @@ if not file_bytes and st.session_state.pending_file_bytes: file_bytes=st.session
 st.markdown('</div>',unsafe_allow_html=True)
 
 # ==================== Processing ====================
-if file_bytes:
+@st.fragment(run_every=2)
+def render_processing():
+    if not file_bytes and not st.session_state.active_job_id: return
     st.markdown('<div class="card">',unsafe_allow_html=True)
     st.markdown('<div class="section-title">تحديث حالات الطلاب</div><div class="section-sub">اضغط الزر لبدء فحص الطلبات وتحديث النتائج.</div>',unsafe_allow_html=True)
-    if st.session_state.update_locked:
+    if st.session_state.update_locked and not st.session_state.active_job_id:
         st.info("🔒 تم تشغيل تحديث بالفعل في هذه الجلسة. لو عايزة تبدئي تحديث جديد، سجّلي خروج وادخلي تاني.")
-    elif st.button("▶ تحديث حالات الطلاب",key="start_main"):
-        st.session_state.update_locked=True
-        try:
-            is_gsheet_source=bool(saved_link and source=="🔗 ربط Google Sheets")
-            source_type="gsheet" if is_gsheet_source else "xlsx"
-            source_name="Google Sheet" if is_gsheet_source else (filename or "students.xlsx")
-            src,count=import_students(office_id,source_type,source_name,file_bytes=file_bytes,source_url=saved_link if is_gsheet_source else None)
-            job=create_job(office_id,src,filename or source_name); st.session_state.active_job_id=job["id"]
-            log_activity(office_id,"إنشاء مهمة تحديث حالات",filename or source_name,{"job_id":job["id"],"students":count},data_source_id=src["id"])
-            st.success(f"تم تجهيز {count} طالب.")
-            result=wait_for_worker_or_legacy_fallback(job["id"])
-            if result=="fallback": st.success("الـ Worker ماكانش متصل، فـ Streamlit نفّذ التحديث بالطريقة القديمة.")
-            elif result=="worker": st.info("الـ Worker استلم المهمة.")
-        except Exception as exc:
-            st.session_state.update_locked=True
-            st.error(str(exc))
-
-    if st.session_state.active_job_id:
-        job=get_job(st.session_state.active_job_id)
-        if job:
-            status=job.get("status","pending")
-            if status in {"pending","processing"}: st.markdown('<div class="job-box">🖥️ التحديث شغال عن طريق الـ Worker المحلي.</div>',unsafe_allow_html=True)
-            rows=get_job_progress_rows(job["id"])
-            if rows:
-                total=int(rows[-1].get("total") or 0); current=len(rows)
-                st.progress(min(current/max(total,1),1.0)); st.caption(f"طالب {current} من {total}")
-                latest = rows[-1]
-                latest_name = latest.get("student_name") or "طالب"
-                latest_status = latest.get("status") or ""
-                st.info(f"🔄 آخر طالب تم فحصه: **{latest_name}** — الحالة الجديدة: **{latest_status}**")
-                table_df=pd.DataFrame([{"اسم الطالب":r.get("student_name",""),"الحالة الجديدة":r.get("status","")} for r in reversed(rows)])
-                st.dataframe(table_df,use_container_width=True,hide_index=True)
-            elif status=="pending": st.info("المهمة في الانتظار حتى يستلمها الـ Worker...")
-            if status=="done":
-                st.session_state.pending_file_bytes=None; st.session_state.pending_filename=""; st.markdown('<div class="success-box"><div class="success-title">اكتمل التحديث 🎉</div><div class="success-desc">تمت معالجة الطلبات عن طريق الجهاز المحلي.</div></div>',unsafe_allow_html=True)
-            elif status=="failed":
-                st.error(job.get("error") or "المهمة فشلت.")
-            elif status=="processing": time.sleep(2); st.rerun()
+    elif file_bytes and not st.session_state.update_locked and not st.session_state.active_job_id:
+        if st.button("▶ تحديث حالات الطلاب",key="start_main"):
+            running=db().table("jobs").select("id").eq("office_id",office_id).in_("status",["pending","processing"]).limit(1).execute().data or []
+            if running: st.warning("في تحديث شغال بالفعل لهذا المكتب. استني لحد ما يخلص.")
+            else:
+                st.session_state.update_locked=True
+                is_gsheet_source=bool(saved_link and source=="🔗 ربط Google Sheets")
+                source_type="gsheet" if is_gsheet_source else "xlsx"
+                source_name="Google Sheet" if is_gsheet_source else (filename or "students.xlsx")
+                src,count=import_students(office_id,source_type,source_name,file_bytes=file_bytes,source_url=saved_link if is_gsheet_source else None)
+                job=create_job(office_id,src,filename or source_name)
+                st.session_state.active_job_id=job["id"]
+                log_activity(office_id,"إنشاء مهمة تحديث حالات",filename or source_name,{"job_id":job["id"],"students":count},data_source_id=src["id"])
+                t=threading.Thread(target=_background_update_job,args=(job["id"],),daemon=True)
+                t.start(); st.session_state.update_thread=t
+                st.success(f"تم تجهيز {count} طالب وبدأ التحديث.")
+                st.rerun()
+    job=get_job(st.session_state.active_job_id) if st.session_state.active_job_id else None
+    if job:
+        status=str(job.get("status") or "pending")
+        if status=="pending": st.info("⏳ بندور على الـ Worker... لو مش موجود، التحديث هيبدأ بالطريقة القديمة بعد 30 ثانية.")
+        elif status=="processing": st.info("🔄 التحديث شغال — الـ Worker أو Streamlit بيحدّث الحالات في الخلفية.")
+        rows=get_job_progress_rows(job["id"])
+        if rows:
+            latest={}
+            for r in rows:
+                k=str(r.get("student_name") or "").strip().lower()
+                if k: latest[k]=r
+            shown=list(latest.values())
+            total=int(rows[-1].get("total") or 0)
+            st.progress(min(len(shown)/max(total,1),1.0))
+            st.caption(f"طالب {min(len(shown),total) if total else len(shown)} من {total}")
+            last=rows[-1]; st.info(f"🔄 آخر طالب تم فحصه: **{last.get('student_name') or 'طالب'}** — الحالة الجديدة: **{last.get('status') or ''}**")
+            st.dataframe(pd.DataFrame([{"اسم الطالب":r.get("student_name",""),"الحالة الجديدة":r.get("status","")} for r in reversed(shown)]),use_container_width=True,hide_index=True)
+        if status=="done": st.markdown('<div class="success-box"><div class="success-title">اكتمل التحديث 🎉</div><div class="success-desc">تمت معالجة الطلبات وتحديث الحالات.</div></div>',unsafe_allow_html=True)
+        elif status=="failed": st.error(job.get("error") or "المهمة فشلت.")
     st.markdown('</div>',unsafe_allow_html=True)
+
+render_processing()
 
 # ==================== Search ====================
 st.markdown('<div class="card">',unsafe_allow_html=True)
