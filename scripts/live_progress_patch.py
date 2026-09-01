@@ -6,4 +6,4 @@ new='''def get_students(office_id, search=""):\n    rows=(db().table("student_re
 if old in s:
     s=s.replace(old,new,1)
 p.write_text(s,encoding='utf-8')
-print('search dedupe patch applied')
+print('search latest-record patch refreshed')
