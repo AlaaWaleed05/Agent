@@ -204,23 +204,44 @@ def get_job_progress_rows(job_id):
     return db().table("job_progress").select("student_index,total,student_name,status,created_at").eq("job_id",job_id).order("student_index").execute().data or []
 
 def get_students(office_id, search=""):
-    rows = (
+    rows=(
         db().table("student_records")
         .select("id,student_name,login_identifier,application_status,status_updated_at,source_row_number,created_at,updated_at")
-        .eq("office_id", office_id)
-        .order("updated_at", desc=True)
+        .eq("office_id",office_id)
         .execute().data or []
     )
-    # Each update imports a fresh source, so keep only the newest record for each student.
-    latest = {}
+
+    def _ts(value):
+        text=str(value or "").strip()
+        if not text:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        try:
+            return datetime.fromisoformat(text.replace("Z","+00:00"))
+        except Exception:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    # لكل طالب: نعرض أحدث حالة فحص فعلية أولاً.
+    # لو فيه سجل أحدث من غير حالة (مثلاً نتيجة رفع جديد)، ما يخليش البحث
+    # يرجع "لم يتم الفحص بعد" فوق حالة أحدث محفوظة بالفعل.
+    latest={}
     for row in rows:
-        key = str(row.get("login_identifier") or row.get("student_name") or "").strip().lower()
-        if key and key not in latest:
-            latest[key] = row
-    rows = sorted(latest.values(), key=lambda r: str(r.get("student_name") or "").lower())
+        key=str(row.get("login_identifier") or row.get("student_name") or "").strip().lower()
+        if not key:
+            continue
+        score=(
+            _ts(row.get("status_updated_at")),
+            _ts(row.get("updated_at")),
+            _ts(row.get("created_at")),
+        )
+        current=latest.get(key)
+        if current is None or score > current[0]:
+            latest[key]=(score,row)
+
+    rows=[item[1] for item in latest.values()]
+    rows=sorted(rows,key=lambda r:str(r.get("student_name") or "").lower())
     if search.strip():
-        q = search.strip().lower()
-        rows = [r for r in rows if q in str(r.get("student_name", "")).lower()]
+        q=search.strip().lower()
+        rows=[r for r in rows if q in str(r.get("student_name","")).lower()]
     return rows
 
 def status_class(status):
