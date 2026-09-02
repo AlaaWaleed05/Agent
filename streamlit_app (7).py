@@ -29,6 +29,11 @@ except Exception:
 BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"
 SITE_URL = "https://admission.study-in-egypt.gov.eg"
 WORKER_WAIT_SECONDS = 30
+# Keep fallback pacing aligned with the Worker timing policy.
+LOGIN_PAGE_DELAY_MIN, LOGIN_PAGE_DELAY_MAX = 0.8, 1.5
+POST_LOGIN_DELAY_SECONDS = 1.0
+INBOX_DELAY_MIN, INBOX_DELAY_MAX = 0.7, 1.5
+STUDENT_DELAY_MIN, STUDENT_DELAY_MAX = 4, 8
 TECH_FAILURE_STATUS = "تعذر فحص الطالب حاليًا"
 FINAL_STATUSES = {
     "مقبول نهائي", "قبول نهائي", "تم الرفض", "مرفوض نهائيًا",
@@ -58,6 +63,12 @@ def now_iso():
 
 def safe_log(message):
     print(f"[Aivora] {message}")
+
+
+def fallback_delay(a, b):
+    """Use the same timing ranges as worker.py without touching Streamlit state."""
+    import random
+    time.sleep(random.uniform(a, b))
 
 
 def get_office_by_name(name):
@@ -407,13 +418,11 @@ def _claim_fallback_job(job_id):
 
 
 def _run_legacy_api_fallback(job_id):
-    """Old API path. Runs independently so the UI remains responsive."""
+    """Old API path with the same pacing policy used by the Worker."""
     try:
         client = db()
         key = os.getenv("STUDENT_PASSWORD_ENCRYPTION_KEY")
         if not key:
-            # Background thread cannot safely depend on Streamlit APIs.
-            # The main thread stores the key in an environment variable only for this process.
             raise RuntimeError("encryption_key_missing")
         students = client.table("student_records").select("*").eq("office_id", job_id["office_id"]).eq("data_source_id", job_id["data_source_id"]).order("source_row_number").execute().data or []
         unique = {}
@@ -434,20 +443,29 @@ def _run_legacy_api_fallback(job_id):
             session = None
             try:
                 if current in FINAL_STATUSES:
-                    # Still publish every student to the live table, even unchanged.
                     status = current
                 else:
                     password = Fernet(key.encode()).decrypt(str(student["encrypted_password"]).encode()).decode()
+
+                    # Same delay used by the Worker after opening the login page.
+                    fallback_delay(LOGIN_PAGE_DELAY_MIN, LOGIN_PAGE_DELAY_MAX)
                     session, token, error = _legacy_api_login(str(student["login_identifier"]).strip(), password)
                     if error:
                         status = "فشل تسجيل الدخول"
                     else:
+                        # Same login-transition wait used by the Worker before continuing.
+                        time.sleep(POST_LOGIN_DELAY_SECONDS)
+                        # Same inbox-navigation delay used by the Worker.
+                        fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
                         status = _legacy_api_get_status(session, token)
             except Exception as exc:
                 status = TECH_FAILURE_STATUS
                 safe_log(f"fallback student error {student.get('id')}: {type(exc).__name__}: {exc}")
             finally:
                 _legacy_api_logout(session)
+                if session is not None:
+                    # Same short pause used by the Worker after logout.
+                    fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
 
             stamp = now_iso()
             try:
@@ -456,6 +474,10 @@ def _run_legacy_api_fallback(job_id):
             except Exception as exc:
                 safe_log(f"fallback persistence error for {name}: {exc}")
 
+            # Exactly the same 4–8 second student-to-student delay as the Worker.
+            if index < total:
+                fallback_delay(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX)
+
         client.table("jobs").update({"status": "done", "finished_at": now_iso(), "error": None}).eq("id", job_id["id"]).execute()
     except Exception as exc:
         safe_log(f"fallback failed: {type(exc).__name__}: {exc}")
@@ -463,7 +485,6 @@ def _run_legacy_api_fallback(job_id):
             db().table("jobs").update({"status": "failed", "finished_at": now_iso(), "error": str(exc)[:1000]}).eq("id", job_id["id"]).execute()
         except Exception as db_exc:
             safe_log(f"fallback job finalization failed: {db_exc}")
-
 
 def _background_update_job(job_id, encryption_key):
     try:
