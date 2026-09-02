@@ -4507,8 +4507,7 @@ if (
     and not st.session_state.active_job_id
     and not st.session_state.job_preparing
 ):
-
-running = (
+    running = (
     db()
     .table("jobs")
     .select("id,status,created_at,started_at")
@@ -4532,6 +4531,8 @@ running = (
     .data
     or []
 )
+
+
     if running:
 
         st.session_state.update_start_requested = False
