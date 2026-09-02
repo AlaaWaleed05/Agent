@@ -1,0 +1,207 @@
+name: Restore retry and final-status behavior
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch Worker and Streamlit fallback
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          worker = Path('worker.py')
+          text = worker.read_text(encoding='utf-8')
+
+          old = '''        for index, student in enumerate(students, 1):
+            name = str(student.get("student_name") or student.get("login_identifier") or "طالب").strip()
+            current = str(student.get("application_status") or "").strip()
+            status = current or "لم يتم الفحص بعد"
+            technical_error = None
+'''
+          new = '''        retry_students = []
+
+        for index, student in enumerate(students, 1):
+            name = str(student.get("student_name") or student.get("login_identifier") or "طالب").strip()
+            current = str(student.get("application_status") or "").strip()
+            status = current or "لم يتم الفحص بعد"
+            technical_error = None
+'''
+          if old not in text:
+              raise SystemExit('Worker anchor 1 not found')
+          text = text.replace(old, new, 1)
+
+          old = '''            if technical_error:
+                status = TECH_FAILURE_STATUS
+                print(f"⚠️ Technical error for {name}: {technical_error}")
+'''
+          new = '''            if technical_error:
+                status = TECH_FAILURE_STATUS
+                retry_students.append((index, student, name))
+                print(f"⚠️ Technical error for {name}: {technical_error}")
+'''
+          if old not in text:
+              raise SystemExit('Worker anchor 2 not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        try:
+            notify_office_status_changes(office, previous, processed)
+'''
+          new = '''        # Second pass: retry only students that had a technical failure.
+        # Final-status students never enter this list because they are skipped above.
+        if retry_students:
+            print(f"=== Retrying {len(retry_students)} technical failure(s) ===")
+            if driver is None:
+                try:
+                    driver = setup_browser()
+                except Exception as exc:
+                    print(f"❌ Could not start Chrome for retry pass: {exc}")
+
+            for index, student, name in retry_students:
+                retry_status = TECH_FAILURE_STATUS
+                if driver is not None:
+                    human_delay(1.0, 2.0, f"Retrying {name}")
+                    try:
+                        password = decrypt_student_password(student["encrypted_password"])
+                        ok, technical, error = selenium_login(driver, str(student["login_identifier"]).strip(), password)
+                        if not ok and not technical:
+                            retry_status = "فشل تسجيل الدخول"
+                        elif not ok:
+                            raise RuntimeError(error or "retry_login_failed")
+                        else:
+                            ok2, error2 = selenium_go_to_inbox(driver)
+                            if not ok2:
+                                raise RuntimeError(error2 or "retry_inbox_failed")
+                            retry_status, technical2, error3 = selenium_get_status(driver)
+                            if technical2:
+                                raise RuntimeError(error3 or "retry_status_failed")
+                    except Exception as exc:
+                        retry_status = TECH_FAILURE_STATUS
+                        print(f"⚠️ Retry failed for {name}: {exc}")
+                        safe_quit(driver)
+                        driver = None
+                        try:
+                            driver = setup_browser()
+                        except Exception as restart_exc:
+                            print(f"❌ Chrome restart after retry failure failed: {restart_exc}")
+
+                try:
+                    update_student_status(student["id"], retry_status)
+                except Exception as exc:
+                    print(f"❌ Retry student update error for {name}: {exc}")
+                try:
+                    append_progress(job_id, index, total, name, retry_status)
+                except Exception as exc:
+                    print(f"❌ Retry progress error for {name}: {exc}")
+
+                processed = [item for item in processed if item.get("name") != name]
+                processed.append({"name": name, "status": retry_status})
+                print(f"    retry | {name} | {retry_status}")
+
+        try:
+            notify_office_status_changes(office, previous, processed)
+'''
+          if old not in text:
+              raise SystemExit('Worker anchor 3 not found')
+          text = text.replace(old, new, 1)
+          worker.write_text(text, encoding='utf-8')
+
+          app = Path('streamlit_app (7).py')
+          text = app.read_text(encoding='utf-8')
+
+          old = '''        for index, student in enumerate(students, 1):
+            name = str(student.get("student_name") or student.get("login_identifier") or "طالب").strip()
+            current = str(student.get("application_status") or "").strip()
+            status = current or "لم يتم الفحص بعد"
+            session = None
+'''
+          new = '''        retry_students = []
+
+        for index, student in enumerate(students, 1):
+            name = str(student.get("student_name") or student.get("login_identifier") or "طالب").strip()
+            current = str(student.get("application_status") or "").strip()
+            status = current or "لم يتم الفحص بعد"
+            session = None
+'''
+          if old not in text:
+              raise SystemExit('Streamlit anchor 1 not found')
+          text = text.replace(old, new, 1)
+
+          old = '''            except Exception as exc:
+                status = TECH_FAILURE_STATUS
+                safe_log(f"fallback student error {student.get('id')}: {type(exc).__name__}: {exc}")
+            finally:
+'''
+          new = '''            except Exception as exc:
+                status = TECH_FAILURE_STATUS
+                retry_students.append((index, student, name))
+                safe_log(f"fallback student error {student.get('id')}: {type(exc).__name__}: {exc}")
+            finally:
+'''
+          if old not in text:
+              raise SystemExit('Streamlit anchor 2 not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        client.table("jobs").update({"status": "done", "finished_at": now_iso(), "error": None}).eq("id", job_id["id"]).execute()
+'''
+          new = '''        # Second pass: retry only technical failures. Final-status students
+        # never enter retry_students because they are skipped above.
+        for index, student, name in retry_students:
+            retry_status = TECH_FAILURE_STATUS
+            session = None
+            try:
+                password = Fernet(key.encode()).decrypt(str(student["encrypted_password"]).encode()).decode()
+                fallback_delay(1.0, 2.0)
+                session, token, error = _legacy_api_login(str(student["login_identifier"]).strip(), password)
+                if error:
+                    retry_status = "فشل تسجيل الدخول"
+                else:
+                    time.sleep(POST_LOGIN_DELAY_SECONDS)
+                    fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
+                    retry_status = _legacy_api_get_status(session, token)
+            except Exception as exc:
+                retry_status = TECH_FAILURE_STATUS
+                safe_log(f"fallback retry error {student.get('id')}: {type(exc).__name__}: {exc}")
+            finally:
+                _legacy_api_logout(session)
+                if session is not None:
+                    fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
+
+            stamp = now_iso()
+            try:
+                client.table("student_records").update({"application_status": retry_status, "status_updated_at": stamp, "updated_at": stamp}).eq("id", student["id"]).execute()
+                client.table("job_progress").insert({"job_id": job_id["id"], "student_index": index, "total": total, "student_name": name, "status": retry_status}).execute()
+            except Exception as exc:
+                safe_log(f"fallback retry persistence error for {name}: {exc}")
+
+        client.table("jobs").update({"status": "done", "finished_at": now_iso(), "error": None}).eq("id", job_id["id"]).execute()
+'''
+          if old not in text:
+              raise SystemExit('Streamlit anchor 3 not found')
+          text = text.replace(old, new, 1)
+          app.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Validate syntax
+        run: |
+          python -m py_compile 'streamlit_app (7).py'
+          python -m py_compile worker.py
+
+      - name: Commit changes and remove this workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add worker.py 'streamlit_app (7).py' .github/workflows/restore-final-status-and-retry.yml
+          git commit -m "Restore technical retry for Worker and fallback" || exit 0
+          git rm .github/workflows/restore-final-status-and-retry.yml
+          git commit -m "Remove one-time retry restoration workflow"
+          git push
