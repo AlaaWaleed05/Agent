@@ -13,7 +13,6 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
-      - run: git checkout d4b21f98035c742c374e641e4fa1cdf5d3c43f1e -- 'streamlit_app (7).py'
       - run: python scripts/live_progress_patch.py
       - run: python scripts/fallback_email_patch.py
       - run: python scripts/worker_timing_patch.py
@@ -24,5 +23,5 @@ jobs:
       - run: git config user.name github-actions[bot]
       - run: git config user.email 41898282+github-actions[bot]@users.noreply.github.com
       - run: git add 'streamlit_app (7).py' worker.py scripts/worker_timing_patch.py scripts/hide_technical_errors.py scripts/office_update_ui_patch.py
-      - run: git commit -m 'Polish office update progress UI' || true
+      - run: git commit -m 'Apply automation patches without resetting app' || true
       - run: git push
