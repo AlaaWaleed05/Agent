@@ -500,7 +500,7 @@ def find_excel_columns(ws):
     for row_idx, row in enumerate(
         ws.iter_rows(
             min_row=1,
-            max_row=5,
+            max_row=min(10, ws.max_row),
             values_only=True
         ),
         start=1
@@ -839,9 +839,9 @@ def find_status_column_for_output(
 
             return col_idx
 
-    raise RuntimeError(
-        "status_column_missing"
-    )
+    new_col = ws.max_column + 1
+    ws.cell(header_row, new_col).value = "حالة الطلب"
+    return new_col
 
 
 # =========================================================
