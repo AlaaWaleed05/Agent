@@ -1,46 +1,35 @@
-name: Validate Aivora
+name: Aivora retry restore
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
-  validate:
+  patch:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - uses: actions/checkout@v4
 
       - name: Restore retry behavior
-        if: github.event_name == 'push'
-        run: python scripts/restore_retry_behavior.py
-
-      - name: Validate syntax
+        shell: bash
         run: |
+          python scripts/restore_retry_behavior.py
           python -m py_compile 'streamlit_app (7).py'
           python -m py_compile worker.py
-
-      - name: Restore validation-only workflow
-        if: github.event_name == 'push'
-        run: |
           cat > .github/workflows/apply-live-table.yml <<'YAML'
           name: Validate Aivora
 
           on:
             push:
-              branches: [main]
+              branches:
+                - main
             pull_request:
-              branches: [main]
+              branches:
+                - main
 
           permissions:
             contents: read
@@ -64,8 +53,8 @@ jobs:
                   run: python -m py_compile worker.py
           YAML
           rm -f scripts/restore_retry_behavior.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add worker.py 'streamlit_app (7).py' .github/workflows/apply-live-table.yml scripts/restore_retry_behavior.py
-          git commit -m "Restore technical retry for Worker and fallback"
+          git commit -m 'Restore technical retry for Worker and fallback' || true
           git push
