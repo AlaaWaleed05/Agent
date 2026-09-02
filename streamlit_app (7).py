@@ -205,23 +205,36 @@ def get_job_progress_rows(job_id):
     return db().table("job_progress").select("student_index,total,student_name,status,created_at").eq("job_id",job_id).order("student_index").execute().data or []
 
 def get_students(office_id, search=""):
-    rows=(db().table("student_records").select("id,student_name,login_identifier,application_status,status_updated_at,source_row_number,created_at,updated_at").eq("office_id",office_id).execute().data or [])
+    rows=(
+        db().table("student_records")
+        .select("id,student_name,login_identifier,application_status,status_updated_at,source_row_number,created_at,updated_at")
+        .eq("office_id",office_id)
+        .execute().data or []
+    )
+
     def _ts(value):
         text=str(value or "").strip()
-        if not text: return datetime.min.replace(tzinfo=timezone.utc)
-        try: return datetime.fromisoformat(text.replace("Z","+00:00"))
-        except Exception: return datetime.min.replace(tzinfo=timezone.utc)
+        if not text:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        try:
+            return datetime.fromisoformat(text.replace("Z","+00:00"))
+        except Exception:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
     latest={}
     for row in rows:
         key=str(row.get("login_identifier") or row.get("student_name") or "").strip().lower()
-        if not key: continue
+        if not key:
+            continue
         score=(_ts(row.get("status_updated_at")),_ts(row.get("updated_at")),_ts(row.get("created_at")))
         current=latest.get(key)
-        if current is None or score > current[0]: latest[key]=(score,row)
+        if current is None or score > current[0]:
+            latest[key]=(score,row)
     rows=[item[1] for item in latest.values()]
     rows=sorted(rows,key=lambda r:str(r.get("student_name") or "").lower())
     if search.strip():
-        q=search.strip().lower(); rows=[r for r in rows if q in str(r.get("student_name","")).lower()]
+        q=search.strip().lower()
+        rows=[r for r in rows if q in str(r.get("student_name","")).lower()]
     return rows
 
 def status_class(status):
@@ -231,84 +244,200 @@ def status_class(status):
     if any(x in s for x in ["مفيش","انتظار","مراجعة"]): return "status-warn"
     return "status-info"
 
+
+
 # ==================== LEGACY API FALLBACK 30S ====================
 BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"
 SITE_URL = "https://admission.study-in-egypt.gov.eg"
 WORKER_WAIT_SECONDS = 30
 
+
 def _decrypt_student_password(value):
     key = st.secrets.get("STUDENT_PASSWORD_ENCRYPTION_KEY", os.getenv("STUDENT_PASSWORD_ENCRYPTION_KEY"))
-    if not key: raise RuntimeError("STUDENT_PASSWORD_ENCRYPTION_KEY مش موجود في Secrets.")
+    if not key:
+        raise RuntimeError("STUDENT_PASSWORD_ENCRYPTION_KEY مش موجود في Secrets.")
     return Fernet(key.encode()).decrypt(str(value).encode()).decode()
+
 
 def _legacy_api_login(email, password):
     session = requests.Session()
-    session.headers.update({"accept":"application/json, text/plain, */*","accept-language":"ar","device":"CITIZEN","origin":SITE_URL,"referer":SITE_URL+"/","user-agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36","content-type":"application/json"})
-    response=session.post(f"{BASE_URL}/student/login",json={"email":email,"password":password},timeout=30)
-    if response.status_code not in (200,201): return None,None,f"فشل تسجيل الدخول - كود: {response.status_code}"
-    body=response.json() if response.content else {}; token=body.get("token","") or response.headers.get("x-csrf-token","")
-    return session,token,None
+    session.headers.update({
+        "accept": "application/json, text/plain, */*",
+        "accept-language": "ar",
+        "device": "CITIZEN",
+        "origin": SITE_URL,
+        "referer": SITE_URL + "/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "content-type": "application/json",
+    })
+    response = session.post(f"{BASE_URL}/student/login", json={"email": email, "password": password}, timeout=30)
+    if response.status_code not in (200, 201):
+        return None, None, f"فشل تسجيل الدخول - كود: {response.status_code}"
+    body = response.json() if response.content else {}
+    token = body.get("token", "") or response.headers.get("x-csrf-token", "")
+    return session, token, None
+
 
 def _legacy_api_get_status(session, token):
-    filt={"where":{},"limit":10,"offset":0,"order":"statusUpdatedAt DESC","fields":["serviceSlug","ID","createdAt","statusUpdatedAt","activityId","activityName"]}
-    headers={"x-csrf-token":token} if token else {}
-    response=session.get(f"{BASE_URL}/dynamic_services/inbox",params={"filter":json.dumps(filt)},headers=headers,timeout=30)
-    if response.status_code not in (200,304): return f"خطأ في جلب الحالة ({response.status_code})"
-    result=response.json().get("result") or []
-    if not result: return "مفيش طلبات"
-    activity=result[0].get("activityName") or "غير محدد"
-    mapping={"قبول الفحص الفنى":"القبول المبدئي","قبول الفحص الفني":"القبول المبدئي","تم السداد":"تم السداد","تأكيد استلام الملف وصحة و اكتمال المستندات":"تأكيد استلام الملف وصحة واكتمال المستندات","الانتظار مراجعة الطلب":"بانتظار مراجعة الطلب","قبول من رئيس الادارة المركزية":"قبول من رئيس الإدارة المركزية"}
-    return mapping.get(activity,activity)
+    filt = {
+        "where": {},
+        "limit": 10,
+        "offset": 0,
+        "order": "statusUpdatedAt DESC",
+        "fields": ["serviceSlug", "ID", "createdAt", "statusUpdatedAt", "activityId", "activityName"],
+    }
+    headers = {"x-csrf-token": token} if token else {}
+    response = session.get(
+        f"{BASE_URL}/dynamic_services/inbox",
+        params={"filter": json.dumps(filt)},
+        headers=headers,
+        timeout=30,
+    )
+    if response.status_code not in (200, 304):
+        return f"خطأ في جلب الحالة ({response.status_code})"
+    result = response.json().get("result") or []
+    if not result:
+        return "مفيش طلبات"
+    activity = result[0].get("activityName") or "غير محدد"
+    mapping = {
+        "قبول الفحص الفنى": "القبول المبدئي",
+        "قبول الفحص الفني": "القبول المبدئي",
+        "تم السداد": "تم السداد",
+        "تأكيد استلام الملف وصحة و اكتمال المستندات": "تأكيد استلام الملف وصحة واكتمال المستندات",
+        "الانتظار مراجعة الطلب": "بانتظار مراجعة الطلب",
+        "قبول من رئيس الادارة المركزية": "قبول من رئيس الإدارة المركزية",
+    }
+    return mapping.get(activity, activity)
+
 
 def _legacy_api_logout(session):
-    if session is None: return
-    try: session.post(f"{BASE_URL}/student/logout",json={"redirectUrl":SITE_URL},timeout=15)
-    except Exception: pass
+    if session is None:
+        return
+    try:
+        session.post(f"{BASE_URL}/student/logout", json={"redirectUrl": SITE_URL}, timeout=15)
+    except Exception:
+        pass
+
 
 def _claim_fallback_job(job_id):
-    rows=(db().table("jobs").update({"status":"processing","started_at":now_iso(),"claimed_by":"streamlit-fallback"}).eq("id",job_id).eq("status","pending").select("*").execute().data or [])
+    rows = (
+        db().table("jobs")
+        .update({"status": "processing", "started_at": now_iso(), "claimed_by": "streamlit-fallback"})
+        .eq("id", job_id)
+        .eq("status", "pending")
+        .select("*")
+        .execute().data or []
+    )
     return rows[0] if rows else None
 
+
 def _run_legacy_api_fallback(job):
-    students=(db().table("student_records").select("*").eq("office_id",job["office_id"]).eq("data_source_id",job["data_source_id"]).order("source_row_number").execute().data or [])
-    students=[row for row in students if str(row.get("application_status") or "").strip() not in FINAL_STATUSES and row.get("login_identifier") and row.get("encrypted_password")]
+    students = (
+        db().table("student_records")
+        .select("*")
+        .eq("office_id", job["office_id"])
+        .eq("data_source_id", job["data_source_id"])
+        .order("source_row_number")
+        .execute().data or []
+    )
+    students = [
+        row for row in students
+        if str(row.get("application_status") or "").strip() not in FINAL_STATUSES
+        and row.get("login_identifier")
+        and row.get("encrypted_password")
+    ]
     if not students:
-        db().table("jobs").update({"status":"done","finished_at":now_iso()}).eq("id",job["id"]).execute(); return
-    total=len(students); technical_failures=[]
+        db().table("jobs").update({"status": "done", "finished_at": now_iso()}).eq("id", job["id"]).execute()
+        return
+
+    total = len(students)
+    technical_failures = []
+
     def check_one(student):
-        session=None; status="خطأ فني في الفحص"; technical=False; error_text=""
+        session = None
+        status = "خطأ فني في الفحص"
+        technical = False
+        error_text = ""
         try:
-            session,token,error=_legacy_api_login(student["login_identifier"],_decrypt_student_password(student["encrypted_password"]))
-            if error: status="فشل تسجيل الدخول"
+            session, token, error = _legacy_api_login(
+                student["login_identifier"],
+                _decrypt_student_password(student["encrypted_password"]),
+            )
+            if error:
+                status = "فشل تسجيل الدخول"
             else:
-                status=_legacy_api_get_status(session,token); technical=str(status).startswith("خطأ")
-                if technical: status="خطأ فني في الفحص"
+                status = _legacy_api_get_status(session, token)
+                technical = str(status).startswith("خطأ")
+                if technical:
+                    status = "خطأ فني في الفحص"
         except Exception as exc:
-            technical=True; error_text=str(exc); status="خطأ فني في الفحص"
-        finally: _legacy_api_logout(session)
-        return status,technical,error_text
-    def save_result(student,status,index_for_progress):
-        stamp=now_iso(); student_id=student["id"]
-        try: db().table("student_records").update({"application_status":status,"status_updated_at":stamp,"updated_at":stamp}).eq("id",student_id).execute()
-        except Exception as exc: print(f"Student status save error for {student_id}: {exc}")
-        student_display=student.get("student_name") or student.get("login_identifier")
-        try: db().table("job_progress").insert({"job_id":job["id"],"student_index":index_for_progress,"total":total,"student_name":student_display,"status":status}).execute()
-        except Exception as exc: print(f"Progress save error for {student_id}: {exc}")
-    for index,student in enumerate(students,1):
-        status,technical,error_text=check_one(student)
-        if technical: technical_failures.append({"student":student,"error":error_text or status})
-        save_result(student,status,index)
-    if technical_failures:
-        for retry_index,item in enumerate(technical_failures,1):
-            status,technical,error_text=check_one(item["student"]); save_result(item["student"],status,total+retry_index)
-    remaining_tech=[]
-    for item in technical_failures:
-        student_id=item["student"]["id"]
+            technical = True
+            error_text = str(exc)
+            status = "خطأ فني في الفحص"
+        finally:
+            _legacy_api_logout(session)
+        return status, technical, error_text
+
+    def save_result(student, status, index_for_progress):
+        stamp = now_iso()
+        student_id = student["id"]
+        # DB failure for one student must not stop the remaining students.
         try:
-            row=db().table("student_records").select("application_status").eq("id",student_id).limit(1).execute().data or []
-            if row and str(row[0].get("application_status") or "").strip()=="خطأ فني في الفحص": remaining_tech.append(item)
-        except Exception: remaining_tech.append(item)
-    db().table("jobs").update({"status":"failed" if len(remaining_tech)>=total else "done","finished_at":now_iso(),"error":"فشل فني في كل الطلاب" if len(remaining_tech)>=total else None}).eq("id",job["id"]).execute()
+            db().table("student_records").update({
+                "application_status": status,
+                "status_updated_at": stamp,
+                "updated_at": stamp,
+            }).eq("id", student_id).execute()
+        except Exception as exc:
+            print(f"Student status save error for {student_id}: {exc}")
+        student_display = student.get("student_name") or student.get("login_identifier")
+        try:
+            db().table("job_progress").insert({
+                "job_id": job["id"],
+                "student_index": index_for_progress,
+                "total": total,
+                "student_name": student_display,
+                "status": status,
+            }).execute()
+        except Exception as exc:
+            print(f"Progress save error for {student_id}: {exc}")
+
+    # الجولة الأولى: كل الطلاب، من غير ما طالب واحد يوقف الباقي.
+    for index, student in enumerate(students, 1):
+        status, technical, error_text = check_one(student)
+        if technical:
+            technical_failures.append({"student": student, "error": error_text or status})
+        save_result(student, status, index)
+
+    # الجولة الثانية: بعد انتهاء كل الطلاب، أعد فحص كل خطأ فني مرة واحدة.
+    if technical_failures:
+        for retry_index, item in enumerate(technical_failures, 1):
+            student = item["student"]
+            status, technical, error_text = check_one(student)
+            save_result(student, status, total + retry_index)
+
+    remaining_tech = []
+    for item in technical_failures:
+        student_id = item["student"]["id"]
+        try:
+            row = (
+                db().table("student_records")
+                .select("application_status")
+                .eq("id", student_id)
+                .limit(1)
+                .execute().data or []
+            )
+            if row and str(row[0].get("application_status") or "").strip() == "خطأ فني في الفحص":
+                remaining_tech.append(item)
+        except Exception:
+            # Keep the failure list for logging if the verification query itself fails.
+            remaining_tech.append(item)
+
+    db().table("jobs").update({
+        "status": "failed" if len(remaining_tech) >= total else "done",
+        "finished_at": now_iso(),
+        "error": "فشل فني في كل الطلاب" if len(remaining_tech) >= total else None,
+    }).eq("id", job["id"]).execute()
 
 def wait_for_worker_or_legacy_fallback(job_id):
     deadline=time.monotonic()+WORKER_WAIT_SECONDS
@@ -318,19 +447,29 @@ def wait_for_worker_or_legacy_fallback(job_id):
         if str(job.get("status") or "pending")!="pending": return "worker"
         time.sleep(2)
     claimed=_claim_fallback_job(job_id)
-    if claimed: _run_legacy_api_fallback(claimed); return "fallback"
+    if claimed:
+        _run_legacy_api_fallback(claimed)
+        return "fallback"
     return "worker"
 
+
 def _background_update_job(job_id):
-    try: wait_for_worker_or_legacy_fallback(job_id)
+    try:
+        wait_for_worker_or_legacy_fallback(job_id)
     except Exception as exc:
-        try: db().table("jobs").update({"status":"failed","finished_at":now_iso(),"error":str(exc)[:1000]}).eq("id",job_id).execute()
-        except Exception as db_exc: print(f"Background job save error: {db_exc}")
+        try:
+            db().table("jobs").update({"status":"failed","finished_at":now_iso(),"error":str(exc)[:1000]}).eq("id",job_id).execute()
+        except Exception as db_exc:
+            print(f"Background job save error: {db_exc}")
 
 # ==================== UI ====================
 st.set_page_config(page_title="Aivora - Agent", page_icon="✨", layout="wide", initial_sidebar_state="collapsed")
+
 import streamlit.components.v1 as components
-components.html("""<script>(function(){try{var d=window.parent.document;if(!d.querySelector('meta[name=\"google\"][content=\"notranslate\"]')){var m=d.createElement('meta');m.name='google';m.content='notranslate';d.head.appendChild(m);}d.documentElement.classList.add('notranslate');d.documentElement.setAttribute('translate','no');}catch(e){}})();</script>""", height=0, width=0)
+components.html("""
+<script>(function(){try{var d=window.parent.document;if(!d.querySelector('meta[name=\"google\"][content=\"notranslate\"]')){var m=d.createElement('meta');m.name='google';m.content='notranslate';d.head.appendChild(m);}d.documentElement.classList.add('notranslate');d.documentElement.setAttribute('translate','no');}catch(e){}})();</script>
+""", height=0, width=0)
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap');
@@ -340,7 +479,7 @@ html,body,[class*="css"],.stApp{font-family:'Cairo',sans-serif!important;directi
 </style>
 """, unsafe_allow_html=True)
 
-for key,default in [("logged_in",False),("is_admin",False),("office",None),("update_locked",False),("pending_file_bytes",None),("pending_filename","") ,("active_job_id",None),("update_start_requested",False),("update_preparing",False)]:
+for key,default in [("logged_in",False),("is_admin",False),("office",None),("update_locked",False),("pending_file_bytes",None),("pending_filename","") ,("active_job_id",None)]:
     if key not in st.session_state: st.session_state[key]=default
 
 # ==================== Login (legacy layout) ====================
@@ -357,7 +496,8 @@ if not st.session_state.logged_in and not st.session_state.is_admin:
             username=st.text_input("اسم المكتب",key="login_user",placeholder="اكتب اسم المكتب")
             password=st.text_input("كلمة المرور",type="password",key="login_pass",placeholder="اكتب كلمة المرور")
             if st.button("تسجيل الدخول",key="login_btn"):
-                if username==ADMIN_USERNAME and password==ADMIN_PASSWORD: st.session_state.is_admin=True; st.rerun()
+                if username==ADMIN_USERNAME and password==ADMIN_PASSWORD:
+                    st.session_state.is_admin=True; st.rerun()
                 else:
                     ok,result=check_login(username,password)
                     if ok: st.session_state.logged_in=True; st.session_state.office=result; st.session_state.update_locked=False; st.rerun()
@@ -398,6 +538,7 @@ if st.session_state.is_admin:
 office=st.session_state.office
 if not office: st.session_state.logged_in=False; st.rerun()
 office_id=office["id"]
+
 st.markdown("<div class='topbar'><div class='brand'><div class='brand-icon'>✨</div><div><div class='brand-title'>Aivora</div><div class='brand-sub'>Your Smarter Support for Every Student's Application</div></div></div></div>", unsafe_allow_html=True)
 
 # ==================== Data source card ====================
@@ -406,13 +547,28 @@ st.markdown('<div class="section-title">مصدر بيانات الطلاب</div>
 source_options=["📂 رفع ملف Excel","🔗 ربط Google Sheets"]
 source=st.radio("",source_options,horizontal=True,label_visibility="collapsed",key="source_mode")
 file_bytes=None; filename=""; saved_link=get_saved_gsheet_link(office_id); sheet_id_source=None
+
 if source=="📂 رفع ملف Excel":
-    uploaded=st.file_uploader("ارفع ملف Excel",type=["xlsx","xls","csv"],label_visibility="collapsed",key="excel_upload")
+    uploaded = st.file_uploader(
+        "ارفع ملف Excel",
+        type=["xlsx", "xls","csv"],
+        label_visibility="collapsed",
+        key="excel_upload",
+    )
     if uploaded:
-        file_bytes=uploaded.getvalue(); filename=uploaded.name
-        if uploaded.name.lower().endswith(".csv"): df=pd.read_csv(io.BytesIO(file_bytes),encoding="utf-8-sig")
-        else: df=pd.read_excel(io.BytesIO(file_bytes))
+        
+        file_bytes = uploaded.getvalue()
+        filename = uploaded.name
+
+        if uploaded.name.lower().endswith(".csv"):
+            
+            df = pd.read_csv(io.BytesIO(file_bytes), encoding="utf-8-sig")
+        else:
+            
+            df = pd.read_excel(io.BytesIO(file_bytes))
+
         st.success(f"تم اختيار الملف: {uploaded.name}")
+  
 else:
     if saved_link:
         st.markdown('<div class="connected-box">✓ Google Sheets متصل بالفعل لهذا المكتب</div>',unsafe_allow_html=True); st.markdown("<div style='height:8px'></div>",unsafe_allow_html=True)
@@ -445,93 +601,59 @@ else:
                     else:
                         wb=openpyxl.Workbook(); ws=wb.active
                         for r in rows: ws.append(r)
-                        out=io.BytesIO(); wb.save(out); st.session_state.pending_file_bytes=out.getvalue(); st.session_state.pending_filename="google_sheet"; st.success("تم جلب بيانات الشيت. البيانات جاهزة للتحديث.")
+                        out=io.BytesIO(); wb.save(out)
+                        st.session_state.pending_file_bytes=out.getvalue(); st.session_state.pending_filename="google_sheet"; st.success("تم جلب بيانات الشيت. البيانات جاهزة للتحديث.")
         else:
             uploaded2=st.file_uploader("ارفع ملف Excel الجديد",type=["xlsx","xls"],label_visibility="collapsed",key="excel_replace")
             if uploaded2: file_bytes=uploaded2.getvalue(); filename=uploaded2.name; st.session_state.pending_file_bytes=file_bytes; st.session_state.pending_filename=filename
+
 if not file_bytes and st.session_state.pending_file_bytes: file_bytes=st.session_state.pending_file_bytes; filename=st.session_state.pending_filename or filename
 st.markdown('</div>',unsafe_allow_html=True)
 
 # ==================== Processing ====================
-def _request_update_start():
-    st.session_state.update_start_requested=True
-    st.session_state.update_preparing=False
-    st.session_state.update_locked=True
-
-def _prepare_update_job(office_id, source_type, source_name, file_bytes, source_url):
-    try:
-        src,count=import_students(office_id,source_type,source_name,file_bytes=file_bytes,source_url=source_url)
-        job=create_job(office_id,src,source_name)
-        log_activity(office_id,"إنشاء مهمة تحديث حالات",source_name,{"job_id":job["id"],"students":count},data_source_id=src["id"])
-        t=threading.Thread(target=_background_update_job,args=(job["id"],),daemon=True); t.start()
-        return job["id"],None
-    except Exception as exc:
-        print(f"Update preparation error: {exc}")
-        return None,str(exc)
-
 @st.fragment(run_every=2)
 def render_processing():
-    if not file_bytes and not st.session_state.active_job_id and not st.session_state.update_start_requested: return
+    if not file_bytes and not st.session_state.active_job_id: return
     st.markdown('<div class="card">',unsafe_allow_html=True)
     st.markdown('<div class="section-title">تحديث حالات الطلاب</div><div class="section-sub">اضغط الزر لبدء فحص الطلبات وتحديث النتائج.</div>',unsafe_allow_html=True)
-
-    if file_bytes and not st.session_state.update_locked and not st.session_state.active_job_id:
-        st.button("▶ تحديث حالات الطلاب",key="start_main",on_click=_request_update_start)
-
-    if st.session_state.update_start_requested and not st.session_state.active_job_id and not st.session_state.update_preparing:
-        running=db().table("jobs").select("id").eq("office_id",office_id).in_("status",["pending","processing"]).limit(1).execute().data or []
-        if running:
-            st.session_state.update_start_requested=False
-            st.session_state.update_locked=True
-            st.warning("في تحديث شغال بالفعل لهذا المكتب. استني لحد ما يخلص.")
-        else:
-            st.session_state.update_preparing=True
-            is_gsheet_source=bool(saved_link and source=="🔗 ربط Google Sheets")
-            source_type="gsheet" if is_gsheet_source else "xlsx"
-            source_name="Google Sheet" if is_gsheet_source else (filename or "students.xlsx")
-            source_url=saved_link if is_gsheet_source else None
-            captured_file_bytes=file_bytes
-            def _runner():
-                job_id,error=_prepare_update_job(office_id,source_type,source_name,captured_file_bytes,source_url)
-                if error: print(f"Update preparation failed: {error}")
-            threading.Thread(target=_runner,daemon=True).start()
-
+    if st.session_state.update_locked and not st.session_state.active_job_id:
+        st.info("🔒 تم تشغيل تحديث بالفعل في هذه الجلسة. لو عايزة تبدئي تحديث جديد، سجّلي خروج وادخلي تاني.")
+    elif file_bytes and not st.session_state.update_locked and not st.session_state.active_job_id:
+        if st.button("▶ تحديث حالات الطلاب",key="start_main"):
+            running=db().table("jobs").select("id").eq("office_id",office_id).in_("status",["pending","processing"]).limit(1).execute().data or []
+            if running: st.warning("في تحديث شغال بالفعل لهذا المكتب. استني لحد ما يخلص.")
+            else:
+                st.session_state.update_locked=True
+                is_gsheet_source=bool(saved_link and source=="🔗 ربط Google Sheets")
+                source_type="gsheet" if is_gsheet_source else "xlsx"
+                source_name="Google Sheet" if is_gsheet_source else (filename or "students.xlsx")
+                src,count=import_students(office_id,source_type,source_name,file_bytes=file_bytes,source_url=saved_link if is_gsheet_source else None)
+                job=create_job(office_id,src,filename or source_name)
+                st.session_state.active_job_id=job["id"]
+                log_activity(office_id,"إنشاء مهمة تحديث حالات",filename or source_name,{"job_id":job["id"],"students":count},data_source_id=src["id"])
+                t=threading.Thread(target=_background_update_job,args=(job["id"],),daemon=True)
+                t.start(); st.session_state.update_thread=t
+                st.success(f"تم تجهيز {count} طالب وبدأ التحديث.")
+                st.rerun()
     job=get_job(st.session_state.active_job_id) if st.session_state.active_job_id else None
-    if not job:
-        active=db().table("jobs").select("*").eq("office_id",office_id).in_("status",["pending","processing"]).order("created_at",desc=True).limit(1).execute().data or []
-        if active:
-            st.session_state.active_job_id=active[0]["id"]
-            job=active[0]
-            st.session_state.update_start_requested=False
-            st.session_state.update_preparing=False
-
-    if st.session_state.update_start_requested or st.session_state.update_preparing:
-        if not job:
-            st.info("⏳ سيبدأ التحديث خلال ثواني…")
-
     if job:
         status=str(job.get("status") or "pending")
-        if status=="pending":
-            st.info("⏳ سيبدأ التحديث خلال ثواني…")
-        elif status=="processing":
-            st.info("▶️ بدأ التحديث. جاري فحص الطلاب وتحديث الحالات…")
+        if status=="pending": st.info("⏳ بندور على الـ Worker... لو مش موجود، التحديث هيبدأ بالطريقة القديمة بعد 30 ثانية.")
+        elif status=="processing": st.info("🔄 التحديث شغال — الـ Worker أو Streamlit بيحدّث الحالات في الخلفية.")
         rows=get_job_progress_rows(job["id"])
         if rows:
             latest={}
             for r in rows:
                 k=str(r.get("student_name") or "").strip().lower()
                 if k: latest[k]=r
-            shown=list(latest.values()); total=int(rows[-1].get("total") or 0)
-            st.progress(min(len(shown)/max(total,1),1.0)); st.caption(f"طالب {min(len(shown),total) if total else len(shown)} من {total}")
+            shown=list(latest.values())
+            total=int(rows[-1].get("total") or 0)
+            st.progress(min(len(shown)/max(total,1),1.0))
+            st.caption(f"طالب {min(len(shown),total) if total else len(shown)} من {total}")
             last=rows[-1]; st.info(f"🔄 آخر طالب تم فحصه: **{last.get('student_name') or 'طالب'}** — الحالة الجديدة: **{last.get('status') or ''}**")
             st.dataframe(pd.DataFrame([{"اسم الطالب":r.get("student_name",""),"الحالة الجديدة":r.get("status","")} for r in reversed(shown)]),use_container_width=True,hide_index=True)
         if status=="done": st.markdown('<div class="success-box"><div class="success-title">اكتمل التحديث 🎉</div><div class="success-desc">تمت معالجة الطلبات وتحديث الحالات.</div></div>',unsafe_allow_html=True)
         elif status=="failed": st.error(job.get("error") or "المهمة فشلت.")
-        if status in {"done","failed"}:
-            st.session_state.update_start_requested=False
-            st.session_state.update_preparing=False
-    elif st.session_state.update_locked:
-        st.info("🔒 تم تشغيل تحديث بالفعل في هذه الجلسة. لو عايزة تبدئي تحديث جديد، سجّلي خروج وادخلي تاني.")
     st.markdown('</div>',unsafe_allow_html=True)
 
 render_processing()
@@ -548,5 +670,7 @@ if search_query:
             st.markdown(f'<div class="result-card"><div class="result-name">👤 {s.get("student_name","")}</div><div class="result-status"><span class="status-badge {status_class(status)}">{status}</span></div></div>',unsafe_allow_html=True)
     else: st.info("مفيش طالب بالاسم ده.")
 st.markdown('</div>',unsafe_allow_html=True)
+
 if st.button("تسجيل الخروج",key="logout_main"): st.session_state.clear(); st.rerun()
+
 log_activity(office_id,"فتح لوحة المكتب")
