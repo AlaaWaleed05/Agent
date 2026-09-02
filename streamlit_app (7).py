@@ -381,6 +381,7 @@ def _run_legacy_api_fallback(job):
     def save_result(student, status, index_for_progress):
         stamp = now_iso()
         student_id = student["id"]
+        # DB failure for one student must not stop the remaining students.
         try:
             db().table("student_records").update({
                 "application_status": status,
@@ -401,12 +402,14 @@ def _run_legacy_api_fallback(job):
         except Exception as exc:
             print(f"Progress save error for {student_id}: {exc}")
 
+    # الجولة الأولى: كل الطلاب، من غير ما طالب واحد يوقف الباقي.
     for index, student in enumerate(students, 1):
         status, technical, error_text = check_one(student)
         if technical:
             technical_failures.append({"student": student, "error": error_text or status})
         save_result(student, status, index)
 
+    # الجولة الثانية: بعد انتهاء كل الطلاب، أعد فحص كل خطأ فني مرة واحدة.
     if technical_failures:
         for retry_index, item in enumerate(technical_failures, 1):
             student = item["student"]
@@ -427,6 +430,7 @@ def _run_legacy_api_fallback(job):
             if row and str(row[0].get("application_status") or "").strip() == "خطأ فني في الفحص":
                 remaining_tech.append(item)
         except Exception:
+            # Keep the failure list for logging if the verification query itself fails.
             remaining_tech.append(item)
 
     db().table("jobs").update({
@@ -458,19 +462,6 @@ def _background_update_job(job_id):
         except Exception as db_exc:
             print(f"Background job save error: {db_exc}")
 
-
-def _prepare_and_start_job(office_id, source_type, source_name, file_bytes, source_url, file_name):
-    try:
-        src, count = import_students(office_id, source_type, source_name, file_bytes=file_bytes, source_url=source_url)
-        job = create_job(office_id, src, file_name)
-        log_activity(office_id, "إنشاء مهمة تحديث حالات", file_name, {"job_id": job["id"], "students": count}, data_source_id=src["id"])
-        t = threading.Thread(target=_background_update_job, args=(job["id"],), daemon=True)
-        t.start()
-        return {"job_id": job["id"], "count": count}
-    except Exception as exc:
-        print(f"Update preparation error: {exc}")
-        return {"error": "preparation_failed"}
-
 # ==================== UI ====================
 st.set_page_config(page_title="Aivora - Agent", page_icon="✨", layout="wide", initial_sidebar_state="collapsed")
 
@@ -484,13 +475,11 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap');
 html,body,[class*="css"],.stApp{font-family:'Cairo',sans-serif!important;direction:rtl;translate:no}.stApp{background:#f5f7fb;color:#111827}.block-container{max-width:1180px;padding-top:1.4rem;padding-bottom:3rem}#MainMenu,footer,header,[data-testid="stToolbar"],[data-testid="stDecoration"],[data-testid="stStatusWidget"],[data-testid="stSidebarNav"]{display:none!important}h1,h2,h3,h4,p,label,span,div{font-family:'Cairo',sans-serif!important}h1{color:#111827!important;font-size:32px!important;font-weight:800!important}.stCaption,[data-testid="stCaptionContainer"] p{color:#6b7280!important}
 .topbar{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:13px 18px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 10px rgba(17,24,39,.04);margin-bottom:22px}.brand{display:flex;align-items:center;gap:11px}.brand-icon{width:42px;height:42px;border-radius:12px;background:#eff6ff;display:flex;align-items:center;justify-content:center;font-size:22px}.brand-title{font-size:18px;font-weight:800;color:#111827}.brand-sub{font-size:12px;color:#6b7280}.card{background:#fff;border:1px solid #e5e7eb;border-radius:18px;padding:22px;box-shadow:0 3px 14px rgba(17,24,39,.045);margin-bottom:18px}.hero{background:linear-gradient(135deg,#fff 0%,#f8fbff 100%);border:1px solid #dbeafe;border-radius:20px;padding:25px 28px;box-shadow:0 4px 18px rgba(37,99,235,.06);margin-bottom:20px}.hero-kicker{color:#6b7280;font-size:14px;font-weight:600}.hero-title{color:#111827;font-size:28px;font-weight:800;margin-top:2px}.hero-title strong{color:#2563eb}.hero-desc{color:#6b7280;font-size:14px;margin-top:3px}.stat-card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:17px 18px}.stat-label{color:#6b7280;font-size:12px;font-weight:600}.stat-value{color:#111827;font-size:21px;font-weight:800;margin-top:2px}.section-title{font-size:18px;font-weight:800;color:#111827;margin:5px 0 13px}.section-sub{color:#6b7280;font-size:13px;margin-top:-8px;margin-bottom:14px}
-.stTextInput label,.stFileUploader label,.stRadio>label,.stCheckbox label{color:#374151!important;font-size:14px!important;font-weight:700!important}.stTextInput input{background:#fff!important;color:#111827!important;border:1px solid #d1d5db!important;border-radius:10px!important;font-size:14px!important;min-height:44px}.stTextInput input:focus{border-color:#2563eb!important;box-shadow:0 0 0 3px rgba(37,99,235,.10)!important}.stTextInput input::placeholder{color:#9ca3af!important}.stButton>button,.stDownloadButton>button{width:100%;min-height:44px;border-radius:10px!important;border:1px solid #2563eb!important;background:#2563eb!important;color:#fff!important;font-weight:700!important;font-size:14px!important;box-shadow:0 3px 8px rgba(37,99,235,.16)!important;transition:.15s ease}.stButton>button:hover,.stDownloadButton>button:hover{background:#1d4ed8!important;border-color:#1d4ed8!important;transform:translateY(-1px)}button[kind="secondary"]{background:#fff!important;color:#2563eb!important}.stRadio div[role="radiogroup"]{gap:10px}.stRadio div[role="radiogroup"] label{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:10px 14px}[data-testid="stFileUploaderDropzone"]{background:#f8fafc!important;border:1.5px dashed #cbd5e1!important;border-radius:14px!important}[data-testid="stFileUploaderDropzone"] button{background:#fff!important;border:1px solid #bfdbfe!important;border-radius:8px!important;font-size:0!important;line-height:1!important;white-space:nowrap!important;overflow:hidden!important}[data-testid="stFileUploaderDropzone"] button span{font-size:0!important}[data-testid="stFileUploaderDropzone"] button::after{content:"";font-family:'Cairo',sans-serif!important;font-size:13px!important;font-weight:700!important;line-height:1.2!important;color:#2563eb!important}.result-card{background:#fff;border:1px solid #e5e7eb;border-radius:13px;padding:14px 16px;margin:8px 0}.result-name{color:#111827;font-size:15px;font-weight:800}.result-status{color:#2563eb;font-size:13px;font-weight:700;margin-top:2px}.status-badge{display:inline-block;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700}.status-ok{background:#ecfdf5;color:#15803d}.status-warn{background:#fffbeb;color:#b45309}.status-error{background:#fef2f2;color:#b91c1c}.status-info{background:#eff6ff;color:#1d4ed8}.connected-box{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:11px 14px;color:#166534;font-size:13px}.success-box{background:#ecfdf5;border:1px solid #bbf7d0;border-radius:14px;padding:16px;margin-top:15px}.success-title{font-size:17px;font-weight:800;color:#166534}.success-desc{color:#166534;font-size:13px;margin-top:4px}.job-box{background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;color:#1d4ed8;font-size:13px;margin-bottom:10px}[data-testid="InputInstructions"]{display:none!important}[data-testid="stTextInput"] button{display:none!important}
-.progress-table{width:100%;border-collapse:collapse;margin-top:12px;direction:rtl}.progress-table th,.progress-table td{border-bottom:1px solid #e5e7eb;padding:10px 12px;text-align:right;font-size:13px}.progress-table th{background:#f8fafc;color:#374151;font-weight:800}.progress-table td:first-child{text-align:left;width:60px;color:#6b7280}.progress-table td:last-child{width:38%;font-weight:700}.progress-table .status-cell{text-align:left;font-weight:700}.progress-table .status-name{text-align:right;font-weight:800;color:#111827}
-@media(max-width:700px){.block-container{padding:.8rem .7rem 2rem}.hero-title{font-size:23px}.topbar{padding:11px 13px}}
+.stTextInput label,.stFileUploader label,.stRadio>label,.stCheckbox label{color:#374151!important;font-size:14px!important;font-weight:700!important}.stTextInput input{background:#fff!important;color:#111827!important;border:1px solid #d1d5db!important;border-radius:10px!important;font-size:14px!important;min-height:44px}.stTextInput input:focus{border-color:#2563eb!important;box-shadow:0 0 0 3px rgba(37,99,235,.10)!important}.stTextInput input::placeholder{color:#9ca3af!important}.stButton>button,.stDownloadButton>button{width:100%;min-height:44px;border-radius:10px!important;border:1px solid #2563eb!important;background:#2563eb!important;color:#fff!important;font-weight:700!important;font-size:14px!important;box-shadow:0 3px 8px rgba(37,99,235,.16)!important;transition:.15s ease}.stButton>button:hover,.stDownloadButton>button:hover{background:#1d4ed8!important;border-color:#1d4ed8!important;transform:translateY(-1px)}button[kind="secondary"]{background:#fff!important;color:#2563eb!important}.stRadio div[role="radiogroup"]{gap:10px}.stRadio div[role="radiogroup"] label{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:10px 14px}[data-testid="stFileUploaderDropzone"]{background:#f8fafc!important;border:1.5px dashed #cbd5e1!important;border-radius:14px!important}[data-testid="stFileUploaderDropzone"] button{background:#fff!important;border:1px solid #bfdbfe!important;border-radius:8px!important;font-size:0!important;line-height:1!important;white-space:nowrap!important;overflow:hidden!important}[data-testid="stFileUploaderDropzone"] button span{font-size:0!important}[data-testid="stFileUploaderDropzone"] button::after{content:"";font-family:'Cairo',sans-serif!important;font-size:13px!important;font-weight:700!important;line-height:1.2!important;color:#2563eb!important}.result-card{background:#fff;border:1px solid #e5e7eb;border-radius:13px;padding:14px 16px;margin:8px 0}.result-name{color:#111827;font-size:15px;font-weight:800}.result-status{color:#2563eb;font-size:13px;font-weight:700;margin-top:2px}.status-badge{display:inline-block;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700}.status-ok{background:#ecfdf5;color:#15803d}.status-warn{background:#fffbeb;color:#b45309}.status-error{background:#fef2f2;color:#b91c1c}.status-info{background:#eff6ff;color:#1d4ed8}.connected-box{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:11px 14px;color:#166534;font-size:13px}.success-box{background:#ecfdf5;border:1px solid #bbf7d0;border-radius:14px;padding:16px;margin-top:15px}.success-title{font-size:17px;font-weight:800;color:#166534}.success-desc{color:#166534;font-size:13px;margin-top:4px}.job-box{background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;color:#1d4ed8;font-size:13px;margin-bottom:10px}[data-testid="InputInstructions"]{display:none!important}[data-testid="stTextInput"] button{display:none!important}@media(max-width:700px){.block-container{padding:.8rem .7rem 2rem}.hero-title{font-size:23px}.topbar{padding:11px 13px}}
 </style>
 """, unsafe_allow_html=True)
 
-for key,default in [("logged_in",False),("is_admin",False),("office",None),("update_locked",False),("pending_file_bytes",None),("pending_filename","") ,("active_job_id",None),("update_waiting",False),("update_starting",False),("update_error",False)]:
+for key,default in [("logged_in",False),("is_admin",False),("office",None),("update_locked",False),("pending_file_bytes",None),("pending_filename","") ,("active_job_id",None)]:
     if key not in st.session_state: st.session_state[key]=default
 
 # ==================== Login (legacy layout) ====================
@@ -511,7 +500,7 @@ if not st.session_state.logged_in and not st.session_state.is_admin:
                     st.session_state.is_admin=True; st.rerun()
                 else:
                     ok,result=check_login(username,password)
-                    if ok: st.session_state.logged_in=True; st.session_state.office=result; st.session_state.update_locked=False; st.session_state.update_waiting=False; st.session_state.update_starting=False; st.session_state.update_error=False; st.rerun()
+                    if ok: st.session_state.logged_in=True; st.session_state.office=result; st.session_state.update_locked=False; st.rerun()
                     else: st.error(result)
         with tab2:
             st.markdown("<div style='font-size:22px;font-weight:800;color:#111827;margin:8px 0 3px;'>إنشاء حساب</div><div style='color:#6b7280;font-size:13px;margin-bottom:18px;'>سجل مكتبك لبدء استخدام الخدمة</div>",unsafe_allow_html=True)
@@ -567,13 +556,19 @@ if source=="📂 رفع ملف Excel":
         key="excel_upload",
     )
     if uploaded:
+        
         file_bytes = uploaded.getvalue()
         filename = uploaded.name
+
         if uploaded.name.lower().endswith(".csv"):
+            
             df = pd.read_csv(io.BytesIO(file_bytes), encoding="utf-8-sig")
         else:
+            
             df = pd.read_excel(io.BytesIO(file_bytes))
+
         st.success(f"تم اختيار الملف: {uploaded.name}")
+  
 else:
     if saved_link:
         st.markdown('<div class="connected-box">✓ Google Sheets متصل بالفعل لهذا المكتب</div>',unsafe_allow_html=True); st.markdown("<div style='height:8px'></div>",unsafe_allow_html=True)
@@ -618,69 +613,47 @@ st.markdown('</div>',unsafe_allow_html=True)
 # ==================== Processing ====================
 @st.fragment(run_every=2)
 def render_processing():
-    if not file_bytes and not st.session_state.active_job_id and not st.session_state.update_waiting: return
+    if not file_bytes and not st.session_state.active_job_id: return
     st.markdown('<div class="card">',unsafe_allow_html=True)
     st.markdown('<div class="section-title">تحديث حالات الطلاب</div><div class="section-sub">اضغط الزر لبدء فحص الطلبات وتحديث النتائج.</div>',unsafe_allow_html=True)
-    if st.session_state.update_waiting and not st.session_state.active_job_id:
-        st.info("⏳ سيبدأ التحديث خلال ثواني…")
-    elif st.session_state.update_locked and not st.session_state.active_job_id:
+    if st.session_state.update_locked and not st.session_state.active_job_id:
         st.info("🔒 تم تشغيل تحديث بالفعل في هذه الجلسة. لو عايزة تبدئي تحديث جديد، سجّلي خروج وادخلي تاني.")
     elif file_bytes and not st.session_state.update_locked and not st.session_state.active_job_id:
         if st.button("▶ تحديث حالات الطلاب",key="start_main"):
             running=db().table("jobs").select("id").eq("office_id",office_id).in_("status",["pending","processing"]).limit(1).execute().data or []
-            if running:
-                st.warning("في تحديث شغال بالفعل لهذا المكتب. استني لحد ما يخلص.")
+            if running: st.warning("في تحديث شغال بالفعل لهذا المكتب. استني لحد ما يخلص.")
             else:
                 st.session_state.update_locked=True
-                st.session_state.update_waiting=True
-                st.session_state.update_error=False
                 is_gsheet_source=bool(saved_link and source=="🔗 ربط Google Sheets")
                 source_type="gsheet" if is_gsheet_source else "xlsx"
                 source_name="Google Sheet" if is_gsheet_source else (filename or "students.xlsx")
-                prep=threading.Thread(target=_prepare_and_start_job,args=(office_id,source_type,source_name,file_bytes,saved_link if is_gsheet_source else None,filename or source_name),daemon=True)
-                prep.start()
-                st.session_state.update_starting=prep
+                src,count=import_students(office_id,source_type,source_name,file_bytes=file_bytes,source_url=saved_link if is_gsheet_source else None)
+                job=create_job(office_id,src,filename or source_name)
+                st.session_state.active_job_id=job["id"]
+                log_activity(office_id,"إنشاء مهمة تحديث حالات",filename or source_name,{"job_id":job["id"],"students":count},data_source_id=src["id"])
+                t=threading.Thread(target=_background_update_job,args=(job["id"],),daemon=True)
+                t.start(); st.session_state.update_thread=t
+                st.success(f"تم تجهيز {count} طالب وبدأ التحديث.")
+                st.rerun()
     job=get_job(st.session_state.active_job_id) if st.session_state.active_job_id else None
-    if not job and st.session_state.update_waiting:
-        recent=db().table("jobs").select("*").eq("office_id",office_id).order("created_at",desc=True).limit(1).execute().data or []
-        if recent:
-            candidate=recent[0]
-            if str(candidate.get("status") or "pending") in {"pending","processing","done","failed"}:
-                st.session_state.active_job_id=candidate["id"]
-                st.session_state.update_waiting=False
-                job=candidate
     if job:
         status=str(job.get("status") or "pending")
-        if status=="pending":
-            st.info("⏳ سيبدأ التحديث خلال ثواني…")
-        elif status=="processing":
-            st.success("▶️ بدأ التحديث. جاري فحص الطلاب وتحديث الحالات…")
+        if status=="pending": st.info("⏳ بندور على الـ Worker... لو مش موجود، التحديث هيبدأ بالطريقة القديمة بعد 30 ثانية.")
+        elif status=="processing": st.info("🔄 التحديث شغال — الـ Worker أو Streamlit بيحدّث الحالات في الخلفية.")
         rows=get_job_progress_rows(job["id"])
         if rows:
             latest={}
             for r in rows:
-                key=(str(r.get("student_name") or "").strip().lower(),str(r.get("status") or "").strip())
-                if key[0]: latest[key]=r
-            shown=sorted(latest.values(),key=lambda r:int(r.get("student_index") or 0),reverse=True)
-            total=max(int(r.get("total") or 0) for r in rows)
-            completed=min(len({str(r.get("student_name") or "").strip().lower() for r in rows if str(r.get("student_name") or "").strip()}),total) if total else 0
-            st.progress(min(completed/max(total,1),1.0))
-            st.caption(f"طالب {completed} من {total}")
-            last=sorted(rows,key=lambda r:int(r.get("student_index") or 0))[-1]
-            st.info(f"🔄 آخر طالب تم فحصه: **{last.get('student_name') or 'طالب'}** — الحالة الجديدة: **{last.get('status') or ''}**")
-            table_rows=[]
-            seen_names=set()
-            for r in sorted(rows,key=lambda x:int(x.get("student_index") or 0),reverse=True):
-                name=str(r.get("student_name") or "").strip()
-                norm=name.lower()
-                if not name or norm in seen_names: continue
-                seen_names.add(norm)
-                table_rows.append(f"<tr><td class='status-cell'>{r.get('status') or ''}</td><td class='status-name'>{name}</td><td>{r.get('student_index') or ''}</td></tr>")
-            st.markdown(f"<table class='progress-table'><thead><tr><th>الحالة</th><th>اسم الطالب</th><th>الرقم</th></tr></thead><tbody>{''.join(table_rows)}</tbody></table>",unsafe_allow_html=True)
-        if status=="done":
-            st.markdown('<div class="success-box"><div class="success-title">اكتمل التحديث 🎉</div><div class="success-desc">تمت معالجة الطلبات وتحديث الحالات.</div></div>',unsafe_allow_html=True)
-        elif status=="failed":
-            st.error("حدثت مشكلة أثناء تحديث الطلبات. بعض الحالات قد تحتاج إلى إعادة المحاولة.")
+                k=str(r.get("student_name") or "").strip().lower()
+                if k: latest[k]=r
+            shown=list(latest.values())
+            total=int(rows[-1].get("total") or 0)
+            st.progress(min(len(shown)/max(total,1),1.0))
+            st.caption(f"طالب {min(len(shown),total) if total else len(shown)} من {total}")
+            last=rows[-1]; st.info(f"🔄 آخر طالب تم فحصه: **{last.get('student_name') or 'طالب'}** — الحالة الجديدة: **{last.get('status') or ''}**")
+            st.dataframe(pd.DataFrame([{"اسم الطالب":r.get("student_name",""),"الحالة الجديدة":r.get("status","")} for r in reversed(shown)]),use_container_width=True,hide_index=True)
+        if status=="done": st.markdown('<div class="success-box"><div class="success-title">اكتمل التحديث 🎉</div><div class="success-desc">تمت معالجة الطلبات وتحديث الحالات.</div></div>',unsafe_allow_html=True)
+        elif status=="failed": st.error(job.get("error") or "المهمة فشلت.")
     st.markdown('</div>',unsafe_allow_html=True)
 
 render_processing()
