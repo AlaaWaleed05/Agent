@@ -438,6 +438,8 @@ def _run_legacy_api_fallback(job_id):
             client.table("jobs").update({"status": "done", "finished_at": now_iso()}).eq("id", job_id["id"]).execute()
             return
 
+        retry_students = []
+
         for index, student in enumerate(students, 1):
             name = str(student.get("student_name") or student.get("login_identifier") or "طالب").strip()
             current = str(student.get("application_status") or "").strip()
@@ -462,6 +464,7 @@ def _run_legacy_api_fallback(job_id):
                         status = _legacy_api_get_status(session, token)
             except Exception as exc:
                 status = TECH_FAILURE_STATUS
+                retry_students.append((index, student, name))
                 safe_log(f"fallback student error {student.get('id')}: {type(exc).__name__}: {exc}")
             finally:
                 _legacy_api_logout(session)
@@ -479,6 +482,35 @@ def _run_legacy_api_fallback(job_id):
             # Exactly the same 4–8 second student-to-student delay as the Worker.
             if index < total:
                 fallback_delay(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX)
+
+        # Retry technical failures once after the first full pass.
+        for index, student, name in retry_students:
+            retry_status = TECH_FAILURE_STATUS
+            session = None
+            try:
+                password = Fernet(key.encode()).decrypt(str(student["encrypted_password"]).encode()).decode()
+                fallback_delay(1.0, 2.0)
+                session, token, error = _legacy_api_login(str(student["login_identifier"]).strip(), password)
+                if error:
+                    retry_status = "فشل تسجيل الدخول"
+                else:
+                    time.sleep(POST_LOGIN_DELAY_SECONDS)
+                    fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
+                    retry_status = _legacy_api_get_status(session, token)
+            except Exception as exc:
+                retry_status = TECH_FAILURE_STATUS
+                safe_log(f"fallback retry error {student.get('id')}: {type(exc).__name__}: {exc}")
+            finally:
+                _legacy_api_logout(session)
+                if session is not None:
+                    fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
+
+            stamp = now_iso()
+            try:
+                client.table("student_records").update({"application_status": retry_status, "status_updated_at": stamp, "updated_at": stamp}).eq("id", student["id"]).execute()
+                client.table("job_progress").insert({"job_id": job_id["id"], "student_index": index, "total": total, "student_name": name, "status": retry_status}).execute()
+            except Exception as exc:
+                safe_log(f"fallback retry persistence error for {name}: {exc}")
 
         client.table("jobs").update({"status": "done", "finished_at": now_iso(), "error": None}).eq("id", job_id["id"]).execute()
     except Exception as exc:

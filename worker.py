@@ -318,6 +318,8 @@ def process_job(job):
         # Browser setup is inside the protected job block.
         driver = setup_browser()
 
+        retry_students = []
+
         for index, student in enumerate(students, 1):
             name = str(student.get("student_name") or student.get("login_identifier") or "طالب").strip()
             current = str(student.get("application_status") or "").strip()
@@ -351,6 +353,7 @@ def process_job(job):
 
             if technical_error:
                 status = TECH_FAILURE_STATUS
+                retry_students.append((index, student, name))
                 print(f"⚠️ Technical error for {name}: {technical_error}")
                 # Restart Chrome for the next student. A single student's failure
                 # must not stop the rest of the queue when restart succeeds.
@@ -393,6 +396,54 @@ def process_job(job):
 
             if index < total:
                 human_delay(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX, "Pause before next student")
+
+        # Retry technical failures once after the first full pass.
+        if retry_students:
+            print(f"=== Retrying {len(retry_students)} technical failure(s) ===")
+            if driver is None:
+                try:
+                    driver = setup_browser()
+                except Exception as exc:
+                    print(f"❌ Could not start Chrome for retry pass: {exc}")
+
+            for index, student, name in retry_students:
+                retry_status = TECH_FAILURE_STATUS
+                if driver is not None:
+                    human_delay(1.0, 2.0, f"Retrying {name}")
+                    try:
+                        password = decrypt_student_password(student["encrypted_password"])
+                        ok, technical, error = selenium_login(driver, str(student["login_identifier"]).strip(), password)
+                        if not ok and not technical:
+                            retry_status = "فشل تسجيل الدخول"
+                        elif not ok:
+                            raise RuntimeError(error or "retry_login_failed")
+                        else:
+                            ok2, error2 = selenium_go_to_inbox(driver)
+                            if not ok2:
+                                raise RuntimeError(error2 or "retry_inbox_failed")
+                            retry_status, technical2, error3 = selenium_get_status(driver)
+                            if technical2:
+                                raise RuntimeError(error3 or "retry_status_failed")
+                    except Exception as exc:
+                        retry_status = TECH_FAILURE_STATUS
+                        print(f"⚠️ Retry failed for {name}: {exc}")
+                        safe_quit(driver)
+                        driver = None
+                        try:
+                            driver = setup_browser()
+                        except Exception as restart_exc:
+                            print(f"❌ Chrome restart after retry failure failed: {restart_exc}")
+
+                try:
+                    update_student_status(student["id"], retry_status)
+                except Exception as exc:
+                    print(f"❌ Retry student update error for {name}: {exc}")
+                try:
+                    append_progress(job_id, index, total, name, retry_status)
+                except Exception as exc:
+                    print(f"❌ Retry progress error for {name}: {exc}")
+                processed = [item for item in processed if item.get("name") != name]
+                processed.append({"name": name, "status": retry_status})
 
         try:
             notify_office_status_changes(office, previous, processed)
