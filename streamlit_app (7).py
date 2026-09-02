@@ -11,6 +11,9 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+
 import bcrypt
 import openpyxl
 import pandas as pd
@@ -29,6 +32,7 @@ except Exception:
 BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"
 SITE_URL = "https://admission.study-in-egypt.gov.eg"
 WORKER_WAIT_SECONDS = 30
+DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "12L_qSHBnW4-tfQZRteynInWNBAML016f")
 # Keep fallback pacing aligned with the Worker timing policy.
 LOGIN_PAGE_DELAY_MIN, LOGIN_PAGE_DELAY_MAX = 0.8, 1.5
 POST_LOGIN_DELAY_SECONDS = 1.0
@@ -279,11 +283,18 @@ def import_students(office_id, source_type, source_name, file_bytes=None, source
 
     encryption_key = st.secrets.get("STUDENT_PASSWORD_ENCRYPTION_KEY", os.getenv("STUDENT_PASSWORD_ENCRYPTION_KEY"))
     source_type = "google_sheet" if source_type in {"gsheet", "google_sheet"} else "excel"
+    file_path = None
+    if source_type == "excel":
+        if not file_bytes:
+            raise ValueError("ملف Excel غير موجود.")
+        file_path = upload_to_drive(file_bytes, source_name, "")
+
     source = db().table("data_sources").insert({
         "office_id": office_id,
         "source_type": source_type,
         "source_name": source_name,
         "source_url": source_url,
+        "file_path": file_path,
         "column_mapping": {},
     }).execute().data[0]
 
@@ -302,12 +313,137 @@ def import_students(office_id, source_type, source_name, file_bytes=None, source
     return source, len(payload)
 
 
+def get_google_credentials(scopes):
+    if Credentials is None:
+        raise RuntimeError("Google credentials libraries unavailable")
+    creds_dict = st.secrets.get("gcp_service_account")
+    if isinstance(creds_dict, dict):
+        return Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    raw = st.secrets.get("GCP_SERVICE_ACCOUNT_JSON", os.getenv("GCP_SERVICE_ACCOUNT_JSON"))
+    if raw:
+        return Credentials.from_service_account_info(json.loads(raw), scopes=scopes)
+    raise RuntimeError("Google service account configuration missing")
+
+
+def drive_service():
+    return build("drive", "v3", credentials=get_google_credentials(["https://www.googleapis.com/auth/drive"]))
+
+
+def upload_to_drive(file_bytes, filename, office):
+    service = drive_service()
+    drive_filename = str(filename or "students.xlsx")
+    metadata = {"name": drive_filename, "parents": [DRIVE_FOLDER_ID]}
+    media = MediaIoBaseUpload(
+        io.BytesIO(file_bytes),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        resumable=True,
+    )
+    return service.files().create(body=metadata, media_body=media, fields="id").execute()["id"]
+
+
+def download_drive_file_bytes(file_id):
+    service = drive_service()
+    buffer = io.BytesIO()
+    request = service.files().get_media(fileId=str(file_id))
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def find_status_column_for_output(ws, header_row):
+    for col_idx, cell in enumerate(ws[header_row], start=1):
+        value = str(cell.value or "").strip().lower()
+        if value in {"حالة الطلب", "الحالة"} or ("حالة" in value and "اسم" not in value and "خدمة" not in value):
+            return col_idx
+    raise RuntimeError("status_column_missing")
+
+
+def build_updated_excel(file_bytes, students):
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+    ws = wb.active
+    cols, header_row = find_excel_columns(ws)
+    status_col = find_status_column_for_output(ws, header_row)
+    by_login = {}
+    by_row = {}
+    for student in students:
+        login = str(student.get("login_identifier") or "").strip().lower()
+        status = str(student.get("application_status") or "").strip()
+        if login and status:
+            by_login[login] = status
+        if student.get("source_row_number") and status:
+            by_row[int(student["source_row_number"])] = status
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        status = None
+        email = str(ws.cell(row_idx, cols["email"] + 1).value or "").strip().lower()
+        if email:
+            status = by_login.get(email)
+        if status is None:
+            status = by_row.get(row_idx)
+        if status is not None:
+            ws.cell(row_idx, status_col).value = status
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
+def update_google_sheet_statuses(source_url, students):
+    sheet_id = extract_sheet_id(source_url)
+    if not sheet_id:
+        raise RuntimeError("invalid_google_sheet_url")
+    spreadsheet = get_gsheet_client().open_by_key(sheet_id)
+    gid = extract_gid(source_url)
+    worksheet = next((w for w in spreadsheet.worksheets() if w.id == gid), spreadsheet.sheet1) if gid is not None else spreadsheet.sheet1
+    values = worksheet.get_all_values()
+    header_idx = None
+    email_idx = None
+    status_idx = None
+    for r_idx, row in enumerate(values[:10]):
+        normalized = [str(v or "").strip().lower() for v in row]
+        if any("يميل" in v or "mail" in v or "بريد" in v for v in normalized):
+            header_idx = r_idx
+            for i, value in enumerate(normalized):
+                if "يميل" in value or "mail" in value or "بريد" in value:
+                    email_idx = i
+                if value in {"حالة الطلب", "الحالة"} or ("حالة" in value and "اسم" not in value and "خدمة" not in value):
+                    status_idx = i
+            break
+    if header_idx is None or email_idx is None or status_idx is None:
+        raise RuntimeError("google_sheet_columns_missing")
+    by_login = {str(s.get("login_identifier") or "").strip().lower(): str(s.get("application_status") or "").strip() for s in students}
+    for row_idx in range(header_idx + 1, len(values)):
+        login = str(values[row_idx][email_idx] if email_idx < len(values[row_idx]) else "").strip().lower()
+        status = by_login.get(login)
+        if status:
+            worksheet.update_cell(row_idx + 1, status_idx + 1, status)
+
+
+def finalize_job_output(job):
+    students = get_students_for_job(job["id"])
+    source_type = str(job.get("source_type") or "")
+    if source_type == "excel":
+        source_ref = str(job.get("source_ref") or "").strip()
+        if not source_ref:
+            raise RuntimeError("excel_source_missing")
+        original = download_drive_file_bytes(source_ref)
+        updated = build_updated_excel(original, students)
+        final_id = upload_to_drive(updated, job.get("file_name") or "students.xlsx", "")
+        db().table("jobs").update({"final_drive_file_id": final_id, "error": None}).eq("id", job["id"]).execute()
+        return final_id
+    if source_type == "google_sheet":
+        update_google_sheet_statuses(str(job.get("source_ref") or ""), students)
+        return None
+    raise RuntimeError(f"unsupported_source_type:{source_type}")
+
+
 def create_job(office_id, source, file_name):
     return db().table("jobs").insert({
         "office_id": office_id,
         "data_source_id": source["id"],
         "source_type": source["source_type"],
-        "source_ref": source.get("source_url") or source["id"],
+        "source_ref": source.get("file_path") or source.get("source_url") or source["id"],
         "file_name": file_name,
         "status": "pending",
     }).execute().data[0]
@@ -512,6 +648,7 @@ def _run_legacy_api_fallback(job_id):
             except Exception as exc:
                 safe_log(f"fallback retry persistence error for {name}: {exc}")
 
+        finalize_job_output(job_id)
         client.table("jobs").update({"status": "done", "finished_at": now_iso(), "error": None}).eq("id", job_id["id"]).execute()
     except Exception as exc:
         safe_log(f"fallback failed: {type(exc).__name__}: {exc}")
@@ -591,6 +728,7 @@ for key, default in [
     ("update_locked", False), ("active_job_id", None),
     ("update_start_requested", False), ("job_preparing", False),
     ("pending_file_bytes", None), ("pending_filename", ""),
+    ("final_file_bytes_cache", None), ("final_file_cache_id", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -788,6 +926,23 @@ def render_processing():
 
     if status == "done":
         st.markdown('<div class="success-box" style="margin-top:14px">اكتمل التحديث 🎉</div>', unsafe_allow_html=True)
+        final_id = str(job.get("final_drive_file_id") or "").strip()
+        if final_id:
+            try:
+                if st.session_state.get("final_file_cache_id") != final_id:
+                    st.session_state.final_file_bytes_cache = download_drive_file_bytes(final_id)
+                    st.session_state.final_file_cache_id = final_id
+                if st.session_state.get("final_file_bytes_cache"):
+                    st.download_button(
+                        "⬇️ تحميل ملف Excel المحدث",
+                        data=st.session_state.final_file_bytes_cache,
+                        file_name=job.get("file_name") or "students_updated.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download_final_{job_id}",
+                    )
+            except Exception as exc:
+                safe_log(f"final file download failed: {type(exc).__name__}: {exc}")
+                st.info("تعذر تجهيز الملف للتحميل حاليًا. حاولي مرة تانية بعد قليل.")
     elif status == "failed":
         # Technical details remain in Supabase logs/job.error; office sees only this safe message.
         st.info("تعذر إكمال التحديث حاليًا. حاولي مرة تانية بعد قليل.")

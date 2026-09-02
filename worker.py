@@ -17,6 +17,10 @@ from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+
 from cryptography.fernet import Fernet
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -39,6 +43,7 @@ FINAL_STATUSES = {
 TECH_FAILURE_STATUS = "تعذر فحص الطالب حاليًا"
 WORKER_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
 CONFIG_FILE = Path(__file__).with_name("service_account.json")
+DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID") or "12L_qSHBnW4-tfQZRteynInWNBAML016f"
 
 
 def get_config():
@@ -62,6 +67,170 @@ def get_setting(name, required=True):
 
 def get_supabase() -> Client:
     return create_client(get_setting("SUPABASE_URL"), get_setting("SUPABASE_SERVICE_ROLE_KEY"))
+
+
+def get_google_credentials(scopes):
+    data = CONFIG.get("gcp_service_account") if isinstance(CONFIG.get("gcp_service_account"), dict) else None
+    if data is None and isinstance(CONFIG, dict) and CONFIG.get("client_email") and CONFIG.get("private_key"):
+        data = CONFIG
+    raw = os.environ.get("GCP_SERVICE_ACCOUNT_JSON") or os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if data is None and raw:
+        data = json.loads(raw)
+    if data:
+        return Credentials.from_service_account_info(data, scopes=scopes)
+    credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if credentials_file:
+        return Credentials.from_service_account_file(credentials_file, scopes=scopes)
+    raise RuntimeError("Google service account configuration missing")
+
+
+def drive_service():
+    return build("drive", "v3", credentials=get_google_credentials(["https://www.googleapis.com/auth/drive"]))
+
+
+def download_drive_file_bytes(file_id):
+    service = drive_service()
+    buffer = io.BytesIO()
+    request = service.files().get_media(fileId=str(file_id))
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def upload_drive_file_bytes(file_bytes, filename):
+    service = drive_service()
+    metadata = {"name": str(filename), "parents": [DRIVE_FOLDER_ID]}
+    media = MediaIoBaseUpload(
+        io.BytesIO(file_bytes),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        resumable=True,
+    )
+    return service.files().create(body=metadata, media_body=media, fields="id").execute()["id"]
+
+
+def find_status_column(ws, header_row):
+    for col_idx, cell in enumerate(ws[header_row], start=1):
+        value = str(cell.value or "").strip().lower()
+        if value in {"حالة الطلب", "الحالة"} or ("حالة" in value and "اسم" not in value and "خدمة" not in value):
+            return col_idx
+    raise RuntimeError("status_column_missing")
+
+
+def build_updated_excel(file_bytes, students):
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+    ws = wb.active
+    cols, header_row = find_excel_columns_for_output(ws)
+    status_col = find_status_column(ws, header_row)
+
+    by_login = {}
+    by_row = {}
+    for student in students:
+        login = str(student.get("login_identifier") or "").strip().lower()
+        status = str(student.get("application_status") or "").strip()
+        if login and status:
+            by_login[login] = status
+        if student.get("source_row_number") and status:
+            by_row[int(student["source_row_number"])] = status
+
+    email_col = cols.get("email")
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        status = None
+        if email_col is not None:
+            email = str(ws.cell(row_idx, email_col + 1).value or "").strip().lower()
+            status = by_login.get(email)
+        if status is None:
+            status = by_row.get(row_idx)
+        if status is not None:
+            ws.cell(row_idx, status_col).value = status
+
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
+def find_excel_columns_for_output(ws):
+    cols = {"name": None, "email": None, "password": None}
+    header_row = None
+    for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=min(10, ws.max_row), values_only=True), start=1):
+        values = [str(c).strip() if c is not None else "" for c in row]
+        if any("يميل" in v or "mail" in v.lower() or "بريد" in v for v in values):
+            header_row = row_idx
+            for i, cell in enumerate(values):
+                low = cell.lower()
+                if any(k in cell for k in ["اسم", "الإسم", "الاسم"]) or "name" in low:
+                    cols["name"] = i
+                elif any(k in cell for k in ["يميل", "بريد"]) or "mail" in low:
+                    cols["email"] = i
+                elif any(k in cell for k in ["باسورد", "كلمة المرور", "password", "pass"]):
+                    cols["password"] = i
+            break
+    if header_row is None or cols["email"] is None or cols["password"] is None:
+        raise RuntimeError("excel_columns_missing")
+    if cols["name"] is None:
+        cols["name"] = cols["email"]
+    return cols, header_row
+
+
+def update_google_sheet_statuses(source_url, students):
+    import gspread
+    credentials = get_google_credentials(["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
+    client = gspread.authorize(credentials)
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", str(source_url))
+    if not match:
+        raise RuntimeError("invalid_google_sheet_url")
+    spreadsheet = client.open_by_key(match.group(1))
+    gid_match = re.search(r"[?#&]gid=(\d+)", str(source_url))
+    gid = int(gid_match.group(1)) if gid_match else None
+    worksheet = next((w for w in spreadsheet.worksheets() if w.id == gid), spreadsheet.sheet1) if gid is not None else spreadsheet.sheet1
+    values = worksheet.get_all_values()
+    if not values:
+        raise RuntimeError("google_sheet_empty")
+    header_idx = None
+    email_idx = None
+    status_idx = None
+    for r_idx, row in enumerate(values[:10]):
+        normalized = [str(v or "").strip().lower() for v in row]
+        if any("يميل" in v or "mail" in v or "بريد" in v for v in normalized):
+            header_idx = r_idx
+            for i, value in enumerate(normalized):
+                if "يميل" in value or "mail" in value or "بريد" in value:
+                    email_idx = i
+                if value in {"حالة الطلب", "الحالة"} or ("حالة" in value and "اسم" not in value and "خدمة" not in value):
+                    status_idx = i
+            break
+    if header_idx is None or email_idx is None or status_idx is None:
+        raise RuntimeError("google_sheet_columns_missing")
+    by_login = {str(s.get("login_identifier") or "").strip().lower(): str(s.get("application_status") or "").strip() for s in students}
+    for row_idx in range(header_idx + 1, len(values)):
+        login = str(values[row_idx][email_idx] if email_idx < len(values[row_idx]) else "").strip().lower()
+        if login in by_login and by_login[login]:
+            worksheet.update_cell(row_idx + 1, status_idx + 1, by_login[login])
+
+
+def finalize_job_output(job):
+    students = get_students_for_job(job)
+    source_type = str(job.get("source_type") or "")
+    if source_type == "excel":
+        source_ref = str(job.get("source_ref") or "").strip()
+        if not source_ref:
+            raise RuntimeError("excel_source_missing")
+        original = download_drive_file_bytes(source_ref)
+        updated = build_updated_excel(original, students)
+        final_id = upload_drive_file_bytes(updated, job.get("file_name") or "students_updated.xlsx")
+        db.table("jobs").update({"final_drive_file_id": final_id, "error": None}).eq("id", job["id"]).execute()
+        print(f"Final Excel uploaded for job {job['id']}: {final_id}")
+        return final_id
+    if source_type == "google_sheet":
+        source_url = str(job.get("source_ref") or "").strip()
+        if not source_url:
+            raise RuntimeError("google_sheet_source_missing")
+        update_google_sheet_statuses(source_url, students)
+        print(f"Google Sheet updated for job {job['id']}")
+        return None
+    raise RuntimeError(f"unsupported_source_type:{source_type}")
 
 
 db = get_supabase()
@@ -444,6 +613,11 @@ def process_job(job):
                     print(f"❌ Retry progress error for {name}: {exc}")
                 processed = [item for item in processed if item.get("name") != name]
                 processed.append({"name": name, "status": retry_status})
+
+        # Produce the final office-facing source output before marking the job done.
+        # For Excel this preserves the workbook and changes only the status column.
+        # For Google Sheets this writes only the status cells back to the same sheet.
+        finalize_job_output(job)
 
         try:
             notify_office_status_changes(office, previous, processed)
