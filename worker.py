@@ -16,7 +16,6 @@ import io
 import json
 import os
 import random
-import requests
 import re
 import socket
 import smtplib
@@ -43,7 +42,6 @@ from supabase import Client, create_client
 
 
 SITE_URL = "https://admission.study-in-egypt.gov.eg"
-BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"
 LOGIN_URL = f"{SITE_URL}/login"
 INBOX_URL = f"{SITE_URL}/inbox"
 
@@ -1237,103 +1235,6 @@ def human_type(
 
 
 # ============================================================
-# RELIABLE HTTP FALLBACK FOR A STUDENT
-# ============================================================
-
-def _legacy_api_login(email, password):
-    session = requests.Session()
-    session.headers.update({
-        "accept": "application/json, text/plain, */*",
-        "accept-language": "ar",
-        "device": "CITIZEN",
-        "origin": SITE_URL,
-        "referer": SITE_URL + "/",
-        "user-agent": "Mozilla/5.0",
-        "content-type": "application/json",
-    })
-
-    response = session.post(
-        f"{BASE_URL}/student/login",
-        json={"email": email, "password": password},
-        timeout=30,
-    )
-
-    if response.status_code not in (200, 201):
-        return None, None, f"login_http_{response.status_code}"
-
-    body = response.json() if response.content else {}
-    token = body.get("token", "") or response.headers.get("x-csrf-token", "")
-    return session, token, None
-
-
-def _legacy_api_get_status(session, token):
-    filt = {
-        "where": {},
-        "limit": 10,
-        "offset": 0,
-        "order": "statusUpdatedAt DESC",
-        "fields": [
-            "serviceSlug",
-            "ID",
-            "createdAt",
-            "statusUpdatedAt",
-            "activityId",
-            "activityName",
-        ],
-    }
-
-    response = session.get(
-        f"{BASE_URL}/dynamic_services/inbox",
-        params={"filter": json.dumps(filt, ensure_ascii=False)},
-        headers={"x-csrf-token": token} if token else {},
-        timeout=30,
-    )
-
-    if response.status_code not in (200, 304):
-        raise RuntimeError(f"status_http_{response.status_code}")
-
-    result = response.json().get("result") or []
-    if not result:
-        return "مفيش طلبات"
-
-    activity = result[0].get("activityName") or "غير محدد"
-    mapping = {
-        "قبول الفحص الفنى": "القبول المبدئي",
-        "قبول الفحص الفني": "القبول المبدئي",
-        "تم السداد": "تم السداد",
-        "تأكيد استلام الملف وصحة و اكتمال المستندات": "تأكيد استلام الملف وصحة واكتمال المستندات",
-        "الانتظار مراجعة الطلب": "بانتظار مراجعة الطلب",
-        "قبول من رئيس الادارة المركزية": "قبول من رئيس الإدارة المركزية",
-    }
-    return mapping.get(activity, activity)
-
-
-def _legacy_api_logout(session):
-    if session is None:
-        return
-    try:
-        session.post(
-            f"{BASE_URL}/student/logout",
-            json={"redirectUrl": SITE_URL},
-            timeout=15,
-        )
-    except Exception:
-        pass
-
-
-def legacy_check_student_status(email, password):
-    session = None
-    try:
-        session, token, error = _legacy_api_login(email, password)
-        if error:
-            return None, error
-        return _legacy_api_get_status(session, token), None
-    except Exception as exc:
-        return None, f"{type(exc).__name__}: {exc}"
-    finally:
-        _legacy_api_logout(session)
-
-# ============================================================
 # SELENIUM
 # ============================================================
 
@@ -2296,36 +2197,21 @@ def process_job(job):
 
             # ====================================================
             # TECHNICAL FAILURE
+            #
+            # A Selenium failure is NEVER sent to the API here.
+            # Queue the student for one Selenium-only retry pass
+            # at the end of this job.
             # ====================================================
 
             if technical_error:
 
-                # Selenium is not allowed to turn a temporary browser/page
-                # problem into a fake student failure. Try the same student's
-                # credentials through the API before retrying anything.
-                try:
-                    fallback_password = decrypt_student_password(
-                        student["encrypted_password"]
-                    )
-                    api_status, api_error = legacy_check_student_status(
-                        str(student.get("login_identifier") or "").strip(),
-                        fallback_password,
-                    )
-                except Exception as fallback_exc:
-                    api_status = None
-                    api_error = f"{type(fallback_exc).__name__}: {fallback_exc}"
+                status = TECH_FAILURE_STATUS
+                retry_students.append((index, student, name))
 
-                if api_status:
-                    status = api_status
-                    technical_error = None
-                    print(f"    ✓ HTTP fallback succeeded for {name}")
-                else:
-                    status = TECH_FAILURE_STATUS
-                    retry_students.append((index, student, name))
-                    print(
-                        f"⚠️ Technical error for {name}: {technical_error}; "
-                        f"API fallback: {api_error}"
-                    )
+                print(
+                    f"⚠️ Technical error for {name}: "
+                    f"{technical_error}; queued for Selenium retry pass"
+                )
 
                 needs_browser_restart = False
 
