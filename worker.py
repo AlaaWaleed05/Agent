@@ -9,6 +9,7 @@ import io
 import json
 import os
 import random
+import re
 import socket
 import smtplib
 import time
@@ -248,7 +249,6 @@ def decrypt_student_password(value):
 
 
 def claim_next_pending_job():
-    # This is the actual RPC created for Aivora's atomic queue.
     response = db.rpc("claim_next_pending_job", {"p_worker_id": WORKER_ID}).execute()
     data = response.data
     if isinstance(data, dict):
@@ -264,11 +264,27 @@ def set_job_status(job_id, status, error=None):
     payload = {"status": status}
     if status == "processing":
         payload["started_at"] = now_iso()
-    if status in {"done", "failed"}:
+    if status in {"done", "failed", "cancelled"}:
         payload["finished_at"] = now_iso()
     if error is not None:
         payload["error"] = str(error)[:1000]
     db.table("jobs").update(payload).eq("id", job_id).execute()
+
+
+def is_job_cancelled(job_id):
+    try:
+        rows = db.table("jobs").select("status").eq("id", job_id).limit(1).execute().data or []
+        return bool(rows and str(rows[0].get("status") or "").lower() == "cancelled")
+    except Exception as exc:
+        print(f"⚠️ Could not check job cancellation for {job_id}: {exc}")
+        return False
+
+
+def stop_if_cancelled(job_id):
+    if is_job_cancelled(job_id):
+        print(f"=== Job {job_id} cancelled by office logout. Stopping worker. ===")
+        return True
+    return False
 
 
 def append_progress(job_id, index, total, student_name, status):
@@ -390,7 +406,6 @@ def clear_session(driver):
 
 def selenium_login(driver, email, password):
     try:
-        driver.get(LOGIN_URL)
         clear_session(driver)
         driver.get(LOGIN_URL)
         wait = WebDriverWait(driver, WAIT_TIME)
@@ -480,27 +495,32 @@ def process_job(job):
         random.shuffle(students)
         total = len(students)
         if not total:
-            set_job_status(job_id, "done")
+            if not stop_if_cancelled(job_id):
+                set_job_status(job_id, "done")
             return
 
         previous = {str(s.get("student_name") or "").strip(): str(s.get("application_status") or "").strip() for s in students if str(s.get("student_name") or "").strip()}
         print(f"=== Starting job {job_id}: {total} students ===")
 
-        # Browser setup is inside the protected job block.
-        driver = setup_browser()
+        if stop_if_cancelled(job_id):
+            return
 
+        driver = setup_browser()
         retry_students = []
 
         for index, student in enumerate(students, 1):
+            if stop_if_cancelled(job_id):
+                return
+
             name = str(student.get("student_name") or student.get("login_identifier") or "طالب").strip()
             current = str(student.get("application_status") or "").strip()
             status = current or "لم يتم الفحص بعد"
             technical_error = None
 
             try:
+                if stop_if_cancelled(job_id):
+                    return
                 if current in FINAL_STATUSES:
-                    # Final applications are not logged into again, but they are
-                    # still written to job_progress so the office sees every student.
                     status = current
                 else:
                     password = decrypt_student_password(student["encrypted_password"])
@@ -510,6 +530,8 @@ def process_job(job):
                     elif not ok:
                         technical_error = error
                     else:
+                        if stop_if_cancelled(job_id):
+                            return
                         ok2, error2 = selenium_go_to_inbox(driver)
                         if not ok2:
                             technical_error = error2
@@ -522,12 +544,13 @@ def process_job(job):
             except Exception as exc:
                 technical_error = str(exc)
 
+            if stop_if_cancelled(job_id):
+                return
+
             if technical_error:
                 status = TECH_FAILURE_STATUS
                 retry_students.append((index, student, name))
                 print(f"⚠️ Technical error for {name}: {technical_error}")
-                # Restart Chrome for the next student. A single student's failure
-                # must not stop the rest of the queue when restart succeeds.
                 safe_quit(driver)
                 driver = None
                 try:
@@ -548,10 +571,13 @@ def process_job(job):
             processed.append({"name": name, "status": status})
             print(f"    {index}/{total} | {name} | {status}")
 
-            # If Chrome could not be restarted, record the remaining students as
-            # failed progress instead of leaving the job hanging.
+            if stop_if_cancelled(job_id):
+                return
+
             if driver is None and index < total:
                 for remaining_index, remaining in enumerate(students[index:], index + 1):
+                    if stop_if_cancelled(job_id):
+                        return
                     remaining_name = str(remaining.get("student_name") or remaining.get("login_identifier") or "طالب").strip()
                     remaining_status = TECH_FAILURE_STATUS
                     try:
@@ -567,9 +593,12 @@ def process_job(job):
 
             if index < total:
                 human_delay(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX, "Pause before next student")
+                if stop_if_cancelled(job_id):
+                    return
 
-        # Retry technical failures once after the first full pass.
         if retry_students:
+            if stop_if_cancelled(job_id):
+                return
             print(f"=== Retrying {len(retry_students)} technical failure(s) ===")
             if driver is None:
                 try:
@@ -578,9 +607,13 @@ def process_job(job):
                     print(f"❌ Could not start Chrome for retry pass: {exc}")
 
             for index, student, name in retry_students:
+                if stop_if_cancelled(job_id):
+                    return
                 retry_status = TECH_FAILURE_STATUS
                 if driver is not None:
                     human_delay(1.0, 2.0, f"Retrying {name}")
+                    if stop_if_cancelled(job_id):
+                        return
                     try:
                         password = decrypt_student_password(student["encrypted_password"])
                         ok, technical, error = selenium_login(driver, str(student["login_identifier"]).strip(), password)
@@ -589,6 +622,8 @@ def process_job(job):
                         elif not ok:
                             raise RuntimeError(error or "retry_login_failed")
                         else:
+                            if stop_if_cancelled(job_id):
+                                return
                             ok2, error2 = selenium_go_to_inbox(driver)
                             if not ok2:
                                 raise RuntimeError(error2 or "retry_inbox_failed")
@@ -605,6 +640,8 @@ def process_job(job):
                         except Exception as restart_exc:
                             print(f"❌ Chrome restart after retry failure failed: {restart_exc}")
 
+                if stop_if_cancelled(job_id):
+                    return
                 try:
                     update_student_status(student["id"], retry_status)
                 except Exception as exc:
@@ -616,10 +653,13 @@ def process_job(job):
                 processed = [item for item in processed if item.get("name") != name]
                 processed.append({"name": name, "status": retry_status})
 
-        # Produce the final office-facing source output before marking the job done.
-        # For Excel this preserves the workbook and changes only the status column.
-        # For Google Sheets this writes only the status cells back to the same sheet.
+        if stop_if_cancelled(job_id):
+            return
+
         finalize_job_output(job)
+
+        if stop_if_cancelled(job_id):
+            return
 
         try:
             notify_office_status_changes(office, previous, processed)
@@ -633,11 +673,15 @@ def process_job(job):
         print(f"❌ Job {job_id} failed: {error_text}")
         traceback.print_exc()
         try:
-            set_job_status(job_id, "failed", error_text)
+            if is_job_cancelled(job_id):
+                print(f"=== Job {job_id} remains cancelled. ===")
+            else:
+                set_job_status(job_id, "failed", error_text)
         except Exception as status_exc:
             print(f"❌ Could not mark job failed: {status_exc}")
         try:
-            notify_developer_error(office, job_id, error_text)
+            if not is_job_cancelled(job_id):
+                notify_developer_error(office, job_id, error_text)
         except Exception as notify_exc:
             print(f"Developer notification warning: {notify_exc}")
     finally:
