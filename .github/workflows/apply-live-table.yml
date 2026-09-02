@@ -1,28 +1,28 @@
-name: Aivora retry restore
+name: Validate Aivora
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch:
+  validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Restore retry behavior
-        shell: bash
-        run: |
-          python scripts/restore_retry_behavior.py
-          python -m py_compile 'streamlit_app (7).py'
-          python -m py_compile worker.py
-          rm -f scripts/restore_retry_behavior.py
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add worker.py 'streamlit_app (7).py' scripts/restore_retry_behavior.py
-          git commit -m 'Restore technical retry for Worker and fallback' || true
-          git push
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile Streamlit app
+        run: python -m py_compile 'streamlit_app (7).py'
+
+      - name: Compile Worker
+        run: python -m py_compile worker.py
