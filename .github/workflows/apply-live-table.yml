@@ -23,7 +23,7 @@ jobs:
 
       - name: Restore legacy UI once
         if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[ui-restored]') }}
-        run: python scripts/restore_legacy_ui_v2.py
+        run: python scripts/restore_legacy_ui_v3.py
 
       - name: Compile Streamlit app
         run: python -m py_compile 'streamlit_app (7).py'
