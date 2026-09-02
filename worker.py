@@ -1477,8 +1477,7 @@ def selenium_get_status(driver):
         status_index = next(
             (
                 i
-                for i, h
-                in enumerate(header_texts)
+                for i, h in enumerate(header_texts)
                 if (
                     h in (
                         "حالة الطلب",
@@ -2079,6 +2078,21 @@ def process_job(job):
 
             technical_error = None
 
+            # ====================================================
+            # NEW:
+            #
+            # Do NOT restart Chrome immediately when a technical
+            # error happens.
+            #
+            # The current student's result MUST first be saved
+            # to Supabase + Excel/Google Sheet + progress.
+            #
+            # Only after the current student is completely saved
+            # will Chrome be restarted.
+            # ====================================================
+
+            needs_browser_restart = False
+
             # Track whether this student
             # successfully logged in.
             logged_in = False
@@ -2233,38 +2247,19 @@ def process_job(job):
                     f"{technical_error}"
                 )
 
-                # Restart Chrome for the next student.
+                # =================================================
+                # IMPORTANT:
+                #
+                # DO NOT restart Chrome here.
+                #
+                # The current student's result has NOT been saved
+                # yet. We first save DB + source + progress below.
+                #
+                # After all those operations are complete,
+                # the browser will be restarted.
+                # =================================================
 
-                safe_quit(
-                    driver
-                )
-
-                driver = None
-
-                try:
-
-                    driver = setup_browser()
-
-                except Exception as restart_exc:
-
-                    print(
-                        f"❌ Chrome restart "
-                        f"failed after "
-                        f"{name}: "
-                        f"{restart_exc}"
-                    )
-
-                    # IMPORTANT:
-                    # Do NOT mark remaining students.
-                    #
-                    # We also DO NOT immediately raise here.
-                    # The retry pass below will try to create
-                    # Chrome again before retrying technical
-                    # failures.
-                    #
-                    # If Chrome still cannot start there,
-                    # the job will fail WITHOUT touching
-                    # unprocessed students.
+                needs_browser_restart = True
 
             # ====================================================
             # UPDATE DATABASE
@@ -2372,6 +2367,75 @@ def process_job(job):
                 )
 
                 return
+
+            # ====================================================
+            # NEW:
+            #
+            # NOW that the current student has been completely
+            # saved, restart Chrome if the previous check had a
+            # technical failure.
+            #
+            # This prevents losing the current student's result.
+            # ====================================================
+
+            if needs_browser_restart:
+
+                print(
+                    f"🔄 Restarting Chrome "
+                    f"after saving "
+                    f"{name}..."
+                )
+
+                safe_quit(
+                    driver
+                )
+
+                driver = None
+
+                # Check cancellation BEFORE starting another
+                # browser. If office logged out, do not continue.
+                if job_is_cancelled(
+                    job_id
+                ):
+
+                    print(
+                        f"🛑 Job {job_id} "
+                        f"was cancelled after "
+                        f"saving {name}, "
+                        f"before Chrome restart."
+                    )
+
+                    return
+
+                try:
+
+                    driver = setup_browser()
+
+                    print(
+                        f"    ✓ Chrome restarted "
+                        f"after {name}"
+                    )
+
+                except Exception as restart_exc:
+
+                    print(
+                        f"❌ Chrome restart "
+                        f"failed after "
+                        f"{name}: "
+                        f"{restart_exc}"
+                    )
+
+                    # IMPORTANT:
+                    # Do NOT mark remaining students.
+                    #
+                    # We also DO NOT immediately raise here.
+                    # The retry pass below will try to create
+                    # Chrome again before retrying technical
+                    # failures.
+                    #
+                    # If Chrome still cannot start there,
+                    # the job will fail WITHOUT touching
+                    # unprocessed students.
 
             # ====================================================
             # IMPORTANT:
