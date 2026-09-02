@@ -3350,7 +3350,40 @@ def _background_update_job(
 
             time.sleep(2)
 
-        # Try to claim only if the job is still pending.
+        # IMPORTANT: the fallback is an emergency path only.
+        # Never compete with a real Selenium worker that is already
+        # processing another job. If any real worker-owned job is
+        # currently processing, leave this job pending so the worker
+        # can claim it when it becomes free.
+        try:
+            active_worker_jobs = (
+                db()
+                .table("jobs")
+                .select("id,claimed_by,status")
+                .eq("status", "processing")
+                .neq("claimed_by", "streamlit-fallback")
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as worker_check_exc:
+            safe_log(
+                f"Could not verify active worker before fallback: "
+                f"{type(worker_check_exc).__name__}: {worker_check_exc}"
+            )
+            return
+
+        if active_worker_jobs:
+            safe_log(
+                f"Real worker is active; leaving job {job_id} pending "
+                f"for the worker queue."
+            )
+            return
+
+        # No worker-owned processing job is visible. Try to claim only
+        # if this job is still pending. This keeps the emergency fallback
+        # from racing a real worker for the same job.
         claimed = _claim_fallback_job(
             job_id
         )
