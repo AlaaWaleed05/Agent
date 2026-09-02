@@ -1,0 +1,65 @@
+name: Tune Selenium human delays
+
+on:
+  push:
+    paths:
+      - '.github/workflows/tune-human-delays.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch delays
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('worker.py')
+          text = p.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  '''        user_menu.click()\n\n        # اضغط "طلباتي"''',
+                  '''        user_menu.click()\n\n        # The menu itself is only a click: keep this pause very short.\n        human_delay(0.20, 0.50)\n\n        # اضغط "طلباتي"'''
+              ),
+              (
+                  '''        my_requests.click()\n\n        # انتظر الصفحة الجديدة\n        human_delay(\n            0.7,\n            1.5\n        )''',
+                  '''        my_requests.click()\n\n        # Do not add a long artificial pause here. Selenium will still\n        # wait for the actual requests table below.\n        human_delay(\n            0.35,\n            0.80\n        )'''
+              ),
+              (
+                  '''        logout.click()\n\n        human_delay(\n            0.7,\n            1.5\n        )''',
+                  '''        logout.click()\n\n        # Logout is also just a click; keep the human pause short.\n        human_delay(\n            0.20,\n            0.55\n        )'''
+              ),
+              (
+                  '''        if status:\n                statuses.append(status)\n\n        return (''',
+                  '''        if status:\n                statuses.append(status)\n\n        # Small random pause after reading the status before logout.\n        if statuses:\n            human_delay(0.20, 0.55)\n\n        return ('''
+              ),
+          ]
+
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'Expected block not found: {old[:80]!r}')
+              text = text.replace(old, new, 1)
+
+          p.write_text(text, encoding='utf-8')
+
+      - name: Verify
+        run: |
+          python -m py_compile worker.py
+          grep -n -A8 -B4 "The menu itself" worker.py
+          grep -n -A8 -B4 "Logout is also" worker.py
+          grep -n -A5 -B3 "Small random pause after reading" worker.py
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add worker.py
+          git diff --cached --quiet && exit 0
+          git commit -m "Tune Selenium human-like delays"
+          git push
