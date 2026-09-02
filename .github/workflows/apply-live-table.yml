@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   validate:
@@ -21,21 +21,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Finalize legacy UI polish once
-        if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[ui-restored]') }}
-        run: python scripts/finalize_legacy_ui.py
-
       - name: Compile Streamlit app
         run: python -m py_compile 'streamlit_app (7).py'
 
       - name: Compile Worker
         run: python -m py_compile worker.py
-
-      - name: Commit restored UI
-        if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[ui-restored]') }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add 'streamlit_app (7).py'
-          git diff --cached --quiet || git commit -m "Restore legacy Aivora UI [ui-restored]"
-          git push
