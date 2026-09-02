@@ -1,0 +1,57 @@
+name: Restore student shuffle
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  restore-shuffle:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore shuffle in Worker and Streamlit fallback
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          worker = Path('worker.py')
+          text = worker.read_text(encoding='utf-8')
+          old = '''        students = get_students_for_job(job)\n        total = len(students)\n'''
+          new = '''        students = get_students_for_job(job)\n        random.shuffle(students)\n        total = len(students)\n'''
+          if old not in text:
+              raise SystemExit('Worker shuffle insertion point not found')
+          if 'random.shuffle(students)' not in text:
+              text = text.replace(old, new, 1)
+              worker.write_text(text, encoding='utf-8')
+
+          app = Path('streamlit_app (7).py')
+          text = app.read_text(encoding='utf-8')
+          old = '''        students = list(unique.values())\n        total = len(students)\n'''
+          new = '''        students = list(unique.values())\n        import random\n        random.shuffle(students)\n        total = len(students)\n'''
+          if old not in text:
+              raise SystemExit('Streamlit shuffle insertion point not found')
+          if 'random.shuffle(students)' not in text:
+              text = text.replace(old, new, 1)
+              app.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Validate Python files
+        run: |
+          python -m py_compile 'streamlit_app (7).py'
+          python -m py_compile worker.py
+
+      - name: Commit changes and remove one-time workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add 'streamlit_app (7).py' worker.py .github/workflows/one_time_restore_student_shuffle.yml
+          git commit -m 'Restore shuffled student processing order'
+          git rm .github/workflows/one_time_restore_student_shuffle.yml
+          git commit -m 'Remove one-time shuffle restore workflow'
+          git push
