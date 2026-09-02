@@ -462,6 +462,52 @@ def _background_update_job(job_id):
         except Exception as db_exc:
             print(f"Background job save error: {db_exc}")
 
+# ==================== UPDATE PREPARATION ====================
+_update_preparation = {}
+_update_preparation_lock = threading.Lock()
+
+def _set_update_preparation(office_id, **values):
+    with _update_preparation_lock:
+        current = _update_preparation.get(str(office_id), {}).copy()
+        current.update(values)
+        _update_preparation[str(office_id)] = current
+
+
+def _get_update_preparation(office_id):
+    with _update_preparation_lock:
+        return _update_preparation.get(str(office_id), {}).copy()
+
+
+def _prepare_update_job(office_id, source_type, source_name, file_bytes, source_url, file_name):
+    try:
+        _set_update_preparation(office_id, status="preparing")
+        src, count = import_students(
+            office_id,
+            source_type,
+            source_name,
+            file_bytes=file_bytes,
+            source_url=source_url,
+        )
+        job = create_job(office_id, src, file_name)
+        log_activity(
+            office_id,
+            "إنشاء مهمة تحديث حالات",
+            file_name,
+            {"job_id": job["id"], "students": count},
+            data_source_id=src["id"],
+        )
+        _set_update_preparation(
+            office_id,
+            status="ready",
+            job_id=job["id"],
+            count=count,
+        )
+        t = threading.Thread(target=_background_update_job, args=(job["id"],), daemon=True)
+        t.start()
+    except Exception as exc:
+        print(f"Update preparation error for office {office_id}: {exc}")
+        _set_update_preparation(office_id, status="failed", error=str(exc)[:1000])
+
 # ==================== UI ====================
 st.set_page_config(page_title="Aivora - Agent", page_icon="✨", layout="wide", initial_sidebar_state="collapsed")
 
@@ -479,7 +525,7 @@ html,body,[class*="css"],.stApp{font-family:'Cairo',sans-serif!important;directi
 </style>
 """, unsafe_allow_html=True)
 
-for key,default in [("logged_in",False),("is_admin",False),("office",None),("update_locked",False),("pending_file_bytes",None),("pending_filename","") ,("active_job_id",None)]:
+for key,default in [("logged_in",False),("is_admin",False),("office",None),("update_locked",False),("pending_file_bytes",None),("pending_filename","") ,("active_job_id",None),("update_starting",False),("update_request_started_at",None)]:
     if key not in st.session_state: st.session_state[key]=default
 
 # ==================== Login (legacy layout) ====================
@@ -556,15 +602,12 @@ if source=="📂 رفع ملف Excel":
         key="excel_upload",
     )
     if uploaded:
-        
         file_bytes = uploaded.getvalue()
         filename = uploaded.name
 
         if uploaded.name.lower().endswith(".csv"):
-            
             df = pd.read_csv(io.BytesIO(file_bytes), encoding="utf-8-sig")
         else:
-            
             df = pd.read_excel(io.BytesIO(file_bytes))
 
         st.success(f"تم اختيار الملف: {uploaded.name}")
@@ -613,38 +656,56 @@ st.markdown('</div>',unsafe_allow_html=True)
 # ==================== Processing ====================
 @st.fragment(run_every=2)
 def render_processing():
-    if not file_bytes and not st.session_state.active_job_id: return
+    prep = _get_update_preparation(office_id)
+    if not file_bytes and not st.session_state.active_job_id and not st.session_state.update_starting: return
     st.markdown('<div class="card">',unsafe_allow_html=True)
     st.markdown('<div class="section-title">تحديث حالات الطلاب</div><div class="section-sub">اضغط الزر لبدء فحص الطلبات وتحديث النتائج.</div>',unsafe_allow_html=True)
-    if st.session_state.update_locked and not st.session_state.active_job_id:
+
+    if st.session_state.update_starting and not st.session_state.active_job_id:
+        if prep.get("status") == "failed":
+            st.session_state.update_starting = False
+            st.error("حصلت مشكلة أثناء تجهيز التحديث. حاولي مرة تانية.")
+        else:
+            st.info("⏳ سيبدأ التحديث خلال ثواني…")
+            if prep.get("job_id"):
+                st.session_state.active_job_id = prep["job_id"]
+                st.session_state.update_starting = False
+                st.rerun()
+
+    elif st.session_state.update_locked and not st.session_state.active_job_id and not st.session_state.update_starting:
         st.info("🔒 تم تشغيل تحديث بالفعل في هذه الجلسة. لو عايزة تبدئي تحديث جديد، سجّلي خروج وادخلي تاني.")
+
     elif file_bytes and not st.session_state.update_locked and not st.session_state.active_job_id:
         if st.button("▶ تحديث حالات الطلاب",key="start_main"):
             running=db().table("jobs").select("id").eq("office_id",office_id).in_("status",["pending","processing"]).limit(1).execute().data or []
-            if running: st.warning("في تحديث شغال بالفعل لهذا المكتب. استني لحد ما يخلص.")
+            if running:
+                st.warning("في تحديث شغال بالفعل لهذا المكتب. استني لحد ما يخلص.")
             else:
                 st.session_state.update_locked=True
+                st.session_state.update_starting=True
+                st.session_state.update_request_started_at=now_iso()
                 is_gsheet_source=bool(saved_link and source=="🔗 ربط Google Sheets")
                 source_type="gsheet" if is_gsheet_source else "xlsx"
                 source_name="Google Sheet" if is_gsheet_source else (filename or "students.xlsx")
-                src,count=import_students(office_id,source_type,source_name,file_bytes=file_bytes,source_url=saved_link if is_gsheet_source else None)
-                job=create_job(office_id,src,filename or source_name)
-                st.session_state.active_job_id=job["id"]
-                log_activity(office_id,"إنشاء مهمة تحديث حالات",filename or source_name,{"job_id":job["id"],"students":count},data_source_id=src["id"])
-                t=threading.Thread(target=_background_update_job,args=(job["id"],),daemon=True)
-                t.start(); st.session_state.update_thread=t
-                st.success(f"تم تجهيز {count} طالب وبدأ التحديث.")
+                source_url=saved_link if is_gsheet_source else None
+                file_name=filename or source_name
+                _set_update_preparation(office_id, status="preparing", job_id=None, count=0, error="")
+                t=threading.Thread(target=_prepare_update_job,args=(office_id,source_type,source_name,file_bytes,source_url,file_name),daemon=True)
+                t.start()
                 st.rerun()
+
     job=get_job(st.session_state.active_job_id) if st.session_state.active_job_id else None
     if job:
         status=str(job.get("status") or "pending")
-        if status=="pending": st.info("⏳ بندور على الـ Worker... لو مش موجود، التحديث هيبدأ بالطريقة القديمة بعد 30 ثانية.")
-        elif status=="processing": st.info("🔄 التحديث شغال — الـ Worker أو Streamlit بيحدّث الحالات في الخلفية.")
+        if status=="pending":
+            st.info("⏳ سيبدأ التحديث خلال ثواني…")
+        elif status=="processing":
+            st.info("▶️ بدأ التحديث. جاري فحص الطلاب وتحديث الحالات…")
         rows=get_job_progress_rows(job["id"])
         if rows:
             latest={}
             for r in rows:
-                k=str(r.get("student_name") or "").strip().lower()
+                k=(str(r.get("student_name") or "").strip().lower(), str(r.get("status") or "").strip().lower())
                 if k: latest[k]=r
             shown=list(latest.values())
             total=int(rows[-1].get("total") or 0)
@@ -652,8 +713,12 @@ def render_processing():
             st.caption(f"طالب {min(len(shown),total) if total else len(shown)} من {total}")
             last=rows[-1]; st.info(f"🔄 آخر طالب تم فحصه: **{last.get('student_name') or 'طالب'}** — الحالة الجديدة: **{last.get('status') or ''}**")
             st.dataframe(pd.DataFrame([{"اسم الطالب":r.get("student_name",""),"الحالة الجديدة":r.get("status","")} for r in reversed(shown)]),use_container_width=True,hide_index=True)
-        if status=="done": st.markdown('<div class="success-box"><div class="success-title">اكتمل التحديث 🎉</div><div class="success-desc">تمت معالجة الطلبات وتحديث الحالات.</div></div>',unsafe_allow_html=True)
-        elif status=="failed": st.error(job.get("error") or "المهمة فشلت.")
+        if status=="done":
+            st.session_state.update_starting=False
+            st.markdown('<div class="success-box"><div class="success-title">اكتمل التحديث 🎉</div><div class="success-desc">تمت معالجة الطلبات وتحديث الحالات.</div></div>',unsafe_allow_html=True)
+        elif status=="failed":
+            st.session_state.update_starting=False
+            st.error("حصلت مشكلة أثناء تحديث الطلبات. حاولي تاني.")
     st.markdown('</div>',unsafe_allow_html=True)
 
 render_processing()
