@@ -1,0 +1,65 @@
+name: Remove HTTP fallback
+
+on:
+  push:
+    paths:
+      - ".github/remove_http_fallback_trigger.txt"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Patch worker
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("worker.py")
+          s = p.read_text(encoding="utf-8")
+
+          s = s.replace("import requests\n", "", 1)
+          s = s.replace('BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"\n', "", 1)
+
+          start = s.find("# ============================================================\n# RELIABLE HTTP FALLBACK FOR A STUDENT")
+          if start == -1:
+              raise SystemExit("HTTP fallback block not found")
+          end = s.find("# ============================================================\n# SELENIUM", start)
+          if end == -1:
+              raise SystemExit("SELENIUM marker not found")
+          s = s[:start] + s[end:]
+
+          old = '''            if technical_error:\n\n                # Selenium is not allowed to turn a temporary browser/page\n                # problem into a fake student failure. Try the same student's\n                # credentials through the API before retrying anything.\n                try:\n                    fallback_password = decrypt_student_password(\n                        student["encrypted_password"]\n                    )\n                    api_status, api_error = legacy_check_student_status(\n                        str(student.get("login_identifier") or "").strip(),\n                        fallback_password,\n                    )\n                except Exception as fallback_exc:\n                    api_status = None\n                    api_error = f"{type(fallback_exc).__name__}: {fallback_exc}"\n\n                if api_status:\n                    status = api_status\n                    technical_error = None\n                    print(f"    ✓ HTTP fallback succeeded for {name}")\n                else:\n                    status = TECH_FAILURE_STATUS\n                    retry_students.append((index, student, name))\n                    print(\n                        f"⚠️ Technical error for {name}: {technical_error}; "\n                        f"API fallback: {api_error}"\n                    )\n\n                needs_browser_restart = False\n'''
+          new = '''            if technical_error:\n\n                # Selenium technical failures are retried only through Selenium\n                # at the end of the first pass. Never use the HTTP/API path here.\n                status = TECH_FAILURE_STATUS\n                retry_students.append((index, student, name))\n\n                print(\n                    f"⚠️ Technical error for {name}: "\n                    f"{technical_error}. Added to retry pass."
+                )\n\n                # Keep the SAME browser/tab for the whole job.\n                needs_browser_restart = False\n'''
+          if old not in s:
+              raise SystemExit("technical-error block not found")
+          s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding="utf-8")
+
+          compile(s, "worker.py", "exec")
+          print("HTTP/API student fallback removed; worker.py compiles.")
+          PY
+      - name: Verify
+        run: |
+          python -m py_compile worker.py
+          if grep -n "legacy_check_student_status\|RELIABLE HTTP FALLBACK\|BASE_URL" worker.py; then exit 1; fi
+      - name: Commit application change and remove patcher
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add worker.py
+          git rm -f .github/remove_http_fallback_trigger.txt .github/workflows/fix-remove-http-fallback.yml
+          git commit -m "Remove per-student HTTP fallback"
+          git push origin main
