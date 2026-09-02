@@ -1636,135 +1636,103 @@ def update_excel_student_status(
     student,
     status
 ):
-    source_ref = str(
-        source_ref or ""
-    ).strip()
-
+    source_ref = str(source_ref or "").strip()
     if not source_ref:
-        raise RuntimeError(
-            "excel_source_missing"
+        raise RuntimeError("excel_source_missing")
+
+    student_name = str(
+        student.get("student_name")
+        or student.get("login_identifier")
+        or "طالب"
+    )
+    print(
+        f"[EXCEL] START file={source_ref} student={student_name} status={status}"
+    )
+
+    try:
+        file_bytes = download_drive_file_bytes(source_ref)
+        if not file_bytes:
+            raise RuntimeError("excel_download_empty")
+        print(f"[EXCEL] downloaded_bytes={len(file_bytes)}")
+
+        wb = openpyxl.load_workbook(
+            io.BytesIO(file_bytes),
+            data_only=False
+        )
+        ws = wb.active
+        cols, header_row = find_excel_columns_for_output(ws)
+        status_col = find_status_column(ws, header_row)
+        email_col = cols.get("email")
+
+        target_row = None
+        login = str(
+            student.get("login_identifier") or ""
+        ).strip().lower()
+
+        if email_col is not None and login:
+            for row_idx in range(header_row + 1, ws.max_row + 1):
+                email = str(
+                    ws.cell(row_idx, email_col + 1).value or ""
+                ).strip().lower()
+                if email == login:
+                    target_row = row_idx
+                    break
+
+        if target_row is None and student.get("source_row_number"):
+            candidate = int(student["source_row_number"])
+            if header_row < candidate <= ws.max_row:
+                target_row = candidate
+
+        if target_row is None:
+            raise RuntimeError(f"excel_student_row_not_found:{login}")
+
+        ws.cell(target_row, status_col).value = str(status)
+
+        output = io.BytesIO()
+        wb.save(output)
+        updated_bytes = output.getvalue()
+        if not updated_bytes:
+            raise RuntimeError("excel_output_empty")
+
+        print(
+            f"[EXCEL] prepared row={target_row} status_col={status_col} bytes={len(updated_bytes)}"
         )
 
-    # Download the CURRENT version of the same file.
-    file_bytes = download_drive_file_bytes(
-        source_ref
-    )
-
-    wb = openpyxl.load_workbook(
-        io.BytesIO(file_bytes),
-        data_only=False
-    )
-
-    ws = wb.active
-
-    cols, header_row = (
-        find_excel_columns_for_output(
-            ws
-        )
-    )
-
-    status_col = find_status_column(
-        ws,
-        header_row
-    )
-
-    email_col = cols.get(
-        "email"
-    )
-
-    target_row = None
-
-    login = str(
-        student.get(
-            "login_identifier"
-        )
-        or ""
-    ).strip().lower()
-
-    # First try matching by email/login
-    if (
-        email_col is not None
-        and login
-    ):
-
-        for row_idx in range(
-            header_row + 1,
-            ws.max_row + 1
-        ):
-
-            email = str(
-                ws.cell(
-                    row_idx,
-                    email_col + 1
-                ).value or ""
-            ).strip().lower()
-
-            if email == login:
-
-                target_row = row_idx
-
-                break
-
-    # Fallback to original source row
-    if (
-        target_row is None
-        and student.get(
-            "source_row_number"
-        )
-    ):
-
-        target_row = int(
-            student[
-                "source_row_number"
-            ]
+        service = drive_service()
+        media = MediaIoBaseUpload(
+            io.BytesIO(updated_bytes),
+            mimetype=(
+                "application/vnd.openxmlformats-"
+                "officedocument.spreadsheetml.sheet"
+            ),
+            resumable=False,
         )
 
-    if target_row is None:
-
-        raise RuntimeError(
-            f"excel_student_row_not_found:"
-            f"{login}"
+        result = (
+            service.files()
+            .update(
+                fileId=source_ref,
+                media_body=media,
+                fields="id,modifiedTime,size,mimeType,name",
+            )
+            .execute()
         )
 
-    # IMPORTANT:
-    # Only update THIS student's status cell.
-    # All other students remain untouched.
+        if str(result.get("id") or "").strip() != source_ref:
+            raise RuntimeError(
+                f"excel_drive_update_wrong_file:{result.get('id')}"
+            )
 
-    ws.cell(
-        target_row,
-        status_col
-    ).value = str(status)
-
-    output = io.BytesIO()
-
-    wb.save(
-        output
-    )
-
-    output.seek(0)
-
-    service = drive_service()
-
-    media = MediaIoBaseUpload(
-        output,
-        mimetype=(
-            "application/vnd.openxmlformats-"
-            "officedocument.spreadsheetml.sheet"
-        ),
-        resumable=True,
-    )
-
-    # IMPORTANT:
-    # Update the SAME Drive file.
-    # Do NOT create a new file.
-    (
-        service.files()
-        .update(
-            fileId=source_ref,
-            media_body=media,
+        print(
+            f"[EXCEL] SUCCESS file={source_ref} row={target_row} status={status} modified={result.get('modifiedTime')}"
         )
-        .execute()
-    )
+
+    except Exception as exc:
+        print(
+            f"[EXCEL] FAILED file={source_ref} student={student_name} "
+            f"{type(exc).__name__}: {exc}"
+        )
+        raise
 
 
 # ============================================================
