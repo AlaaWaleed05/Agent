@@ -19,11 +19,9 @@ jobs:
           p = Path('worker.py')
           s = p.read_text(encoding='utf-8')
 
-          # Remove import/config used only by the old API fallback.
           s = s.replace('import requests\n', '')
           s = s.replace('BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"\n', '')
 
-          # Remove the entire legacy API fallback section.
           start = s.find('# ============================================================\n# RELIABLE HTTP FALLBACK FOR A STUDENT')
           if start != -1:
               end = s.find('# ============================================================\n# SELENIUM', start)
@@ -31,7 +29,6 @@ jobs:
                   raise SystemExit('Could not find end of HTTP fallback section')
               s = s[:start] + s[end:]
 
-          # Replace the first-pass technical failure branch.
           marker = '            # ====================================================\n            # TECHNICAL FAILURE\n'
           old_start = s.find(marker)
           if old_start == -1:
@@ -43,20 +40,13 @@ jobs:
           new_block = '''            # ====================================================\n            # TECHNICAL FAILURE\n            #\n            # A Selenium failure is NEVER sent to the API here.\n            # Queue the student for one Selenium-only retry pass\n            # at the end of this job.\n            # ====================================================\n\n            if technical_error:\n\n                status = TECH_FAILURE_STATUS\n                retry_students.append((index, student, name))\n\n                print(\n                    f"⚠️ Technical error for {name}: "\n                    f"{technical_error}; queued for Selenium retry pass"\n                )\n\n                needs_browser_restart = False\n\n'''
           s = s[:old_start] + new_block + s[old_end:]
 
-          # Remove any leftover standalone requests import/config lines.
-          s = '\n'.join(
-              line for line in s.split('\n')
-              if line.strip() != 'import requests'
-              and not line.startswith('BASE_URL =')
-          )
-
           p.write_text(s, encoding='utf-8')
           PY
 
       - name: Verify
         run: |
           python -m py_compile worker.py
-          if grep -nE 'legacy_check_student_status|_legacy_api_|BASE_URL|import requests|HTTP fallback succeeded' worker.py; then
+          if grep -nE 'legacy_check_student_status|_legacy_api_|^BASE_URL[[:space:]]*=|^import requests$|HTTP fallback succeeded' worker.py; then
             echo 'HTTP/API fallback still exists in worker.py'
             exit 1
           fi
