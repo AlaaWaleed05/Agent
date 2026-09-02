@@ -717,7 +717,21 @@ for key, default in [
 
 # Login
 if not st.session_state.logged_in and not st.session_state.is_admin:
-    st.markdown("<div style='text-align:center;margin:36px 0 22px'><div style='font-size:46px'>✨</div><div style='font-size:31px;font-weight:800'>Aivora</div><div style='font-size:14px;color:#6b7280'>Your Smarter Support for Every Student's Application</div></div>", unsafe_allow_html=True)
+    st.markdown("""
+        <div style="padding:40px 20px 20px 10px;">
+            <div style="font-size:14px;color:#2563eb;font-weight:800;margin-bottom:8px;">حل بسيط لإدارة المتابعة</div>
+            <div style="font-size:31px;font-weight:800;color:#111827;line-height:1.35;">تابع طلبات طلابك<br>من مكان واحد.</div>
+            <div style="font-size:15px;color:#6b7280;line-height:1.9;margin-top:12px;max-width:480px;">
+                حدّث حالات الطلبات، اربط Google Sheets، وابحث عن أي طالب بسرعة بدون متابعة يدوية.
+            </div>
+            <div style="margin-top:22px;color:#374151;font-size:14px;line-height:2.2;">
+                ✓ تحديث حالات الطلاب بشكل منظم<br>
+                ✓ حفظ مصدر البيانات للمكتب<br>
+                ✓ بحث سريع عن حالة أي طالب
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+)
     left, right = st.columns([1.15, 1], gap="large")
     with left:
         st.markdown("<div style='padding:34px 18px'><div style='font-size:14px;color:#2563eb;font-weight:800'>حل بسيط لإدارة المتابعة</div><div style='font-size:30px;font-weight:800;line-height:1.35'>تابع طلبات طلابك<br>من مكان واحد.</div><div style='font-size:15px;color:#6b7280;line-height:1.9;margin-top:12px'>حدّث حالات الطلبات، اربط Google Sheets، وابحث عن أي طالب بسرعة بدون متابعة يدوية.</div></div>", unsafe_allow_html=True)
