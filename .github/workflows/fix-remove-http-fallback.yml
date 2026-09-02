@@ -16,50 +16,30 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Patch worker Excel live update
         run: |
           python - <<'PY'
           from pathlib import Path
-          import re
-
           p = Path("worker.py")
           s = p.read_text(encoding="utf-8")
-
           start_marker = "# ============================================================\n# LIVE EXCEL UPDATE\n# ============================================================\n"
           end_marker = "# ============================================================\n# LIVE GOOGLE SHEET UPDATE\n# ============================================================\n"
-
           start = s.find(start_marker)
-          if start == -1:
-              raise SystemExit("LIVE EXCEL UPDATE marker not found")
           end = s.find(end_marker, start)
-          if end == -1:
-              raise SystemExit("LIVE GOOGLE SHEET UPDATE marker not found")
-
-          replacement = '''# ============================================================\n# LIVE EXCEL UPDATE\n# ============================================================\n\ndef update_excel_student_status(\n    source_ref,\n    student,\n    status\n):\n    \"\"\"Update the SAME Drive Excel file for exactly one student.\n\n    This function deliberately does not create a second output file.\n    It downloads the current workbook, changes one status cell, uploads\n    that workbook back to the same Drive file, and verifies the Drive\n    update succeeded.\n    \"\"\"\n    source_ref = str(source_ref or \"\").strip()\n    if not source_ref:\n        raise RuntimeError(\"excel_source_missing\")\n\n    print(\n        f\"[EXCEL] start live update | file={source_ref} | \"\n        f\"student={student.get('student_name') or student.get('login_identifier')} | \"\n        f\"status={status}\"\n    )\n\n    try:\n        file_bytes = download_drive_file_bytes(source_ref)\n        print(f\"[EXCEL] downloaded {len(file_bytes)} bytes\")\n\n        if not file_bytes:\n            raise RuntimeError(\"excel_download_empty\")\n\n        wb = openpyxl.load_workbook(\n            io.BytesIO(file_bytes),\n            data_only=False\n        )\n        ws = wb.active\n\n        cols, header_row = find_excel_columns_for_output(ws)\n        status_col = find_status_column(ws, header_row)\n        email_col = cols.get(\"email\")\n\n        target_row = None\n        login = str(\n            student.get(\"login_identifier\") or \"\"\n        ).strip().lower()\n\n        if email_col is not None and login:\n            for row_idx in range(\n                header_row + 1,\n                ws.max_row + 1\n            ):\n                email = str(\n                    ws.cell(\n                        row_idx,\n                        email_col + 1\n                    ).value or \"\"\n                ).strip().lower()\n\n                if email == login:\n                    target_row = row_idx\n                    break\n\n        if target_row is None and student.get(\"source_row_number\"):\n            candidate = int(student[\"source_row_number\"])\n            if header_row < candidate <= ws.max_row:\n                target_row = candidate\n\n        if target_row is None:\n            raise RuntimeError(\n                f\"excel_student_row_not_found:{login}\"\n            )\n\n        ws.cell(\n            target_row,\n            status_col\n        ).value = str(status)\n\n        output = io.BytesIO()\n        wb.save(output)\n        updated_bytes = output.getvalue()\n\n        if not updated_bytes:\n            raise RuntimeError(\"excel_output_empty\")\n\n        print(\n            f\"[EXCEL] prepared update | row={target_row} | \"\n            f\"status_col={status_col} | bytes={len(updated_bytes)}\"\n        )\n\n        service = drive_service()\n        media = MediaIoBaseUpload(\n            io.BytesIO(updated_bytes),\n            mimetype=(\n                \"application/vnd.openxmlformats-\"\n                \"officedocument.spreadsheetml.sheet\"\n            ),\n            resumable=False,\n        )\n\n        result = (\n            service.files()\n            .update(\n                fileId=source_ref,\n                body={\n                    \"name\": str(\n                        student.get(\"source_file_name\")\n                        or \"students.xlsx\"\n                    )\n                },\n                media_body=media,\n                fields=\"id,modifiedTime,size,mimeType,name\",\n            )\n            .execute()\n        )\n\n        returned_id = str(result.get(\"id\") or \"\").strip()\n        if returned_id != source_ref:\n            raise RuntimeError(\n                f\"excel_drive_update_wrong_file:{returned_id}\"\n            )\n\n        print(\n            f\"[EXCEL] SUCCESS | file={source_ref} | \"\n            f\"row={target_row} | status={status} | \"\n            f\"modified={result.get('modifiedTime')}\"\n        )\n\n    except Exception as exc:\n        print(\n            f\"[EXCEL] FAILED | file={source_ref} | \"\n            f\"student={student.get('student_name') or student.get('login_identifier')} | \"\n            f\"{type(exc).__name__}: {exc}\"\n        )\n        raise\n\n\n'''
-
+          if start < 0 or end < 0:
+              raise SystemExit("Excel update markers not found")
+          replacement = '''# ============================================================\n# LIVE EXCEL UPDATE\n# ============================================================\n\ndef update_excel_student_status(\n    source_ref,\n    student,\n    status\n):\n    source_ref = str(source_ref or "").strip()\n    if not source_ref:\n        raise RuntimeError("excel_source_missing")\n\n    student_name = str(\n        student.get("student_name")\n        or student.get("login_identifier")\n        or "طالب"\n    )\n    print(\n        f"[EXCEL] START file={source_ref} student={student_name} status={status}"\n    )\n\n    try:\n        file_bytes = download_drive_file_bytes(source_ref)\n        if not file_bytes:\n            raise RuntimeError("excel_download_empty")\n        print(f"[EXCEL] downloaded_bytes={len(file_bytes)}")\n\n        wb = openpyxl.load_workbook(\n            io.BytesIO(file_bytes),\n            data_only=False\n        )\n        ws = wb.active\n        cols, header_row = find_excel_columns_for_output(ws)\n        status_col = find_status_column(ws, header_row)\n        email_col = cols.get("email")\n\n        target_row = None\n        login = str(\n            student.get("login_identifier") or ""\n        ).strip().lower()\n\n        if email_col is not None and login:\n            for row_idx in range(header_row + 1, ws.max_row + 1):\n                email = str(\n                    ws.cell(row_idx, email_col + 1).value or ""\n                ).strip().lower()\n                if email == login:\n                    target_row = row_idx\n                    break\n\n        if target_row is None and student.get("source_row_number"):\n            candidate = int(student["source_row_number"])\n            if header_row < candidate <= ws.max_row:\n                target_row = candidate\n\n        if target_row is None:\n            raise RuntimeError(f"excel_student_row_not_found:{login}")\n\n        ws.cell(target_row, status_col).value = str(status)\n\n        output = io.BytesIO()\n        wb.save(output)\n        updated_bytes = output.getvalue()\n        if not updated_bytes:\n            raise RuntimeError("excel_output_empty")\n\n        print(\n            f"[EXCEL] prepared row={target_row} status_col={status_col} bytes={len(updated_bytes)}"\n        )\n\n        service = drive_service()\n        media = MediaIoBaseUpload(\n            io.BytesIO(updated_bytes),\n            mimetype=(\n                "application/vnd.openxmlformats-"\n                "officedocument.spreadsheetml.sheet"\n            ),\n            resumable=False,\n        )\n\n        result = (\n            service.files()\n            .update(\n                fileId=source_ref,\n                media_body=media,\n                fields="id,modifiedTime,size,mimeType,name",\n            )\n            .execute()\n        )\n\n        if str(result.get("id") or "").strip() != source_ref:\n            raise RuntimeError(\n                f"excel_drive_update_wrong_file:{result.get('id')}"\n            )\n\n        print(\n            f"[EXCEL] SUCCESS file={source_ref} row={target_row} status={status} modified={result.get('modifiedTime')}"\n        )\n\n    except Exception as exc:\n        print(\n            f"[EXCEL] FAILED file={source_ref} student={student_name} "\n            f"{type(exc).__name__}: {exc}"\n        )\n        raise\n\n\n'''
           s = s[:start] + replacement + s[end:]
-
-          # Make the worker's source-update failure visible at job level.
-          # The existing process_job try/except remains responsible for the
-          # exact student context; this removes silent Excel failures.
-          old = '''            try:\n\n                update_source_student_status(\n                    job,\n                    student,\n                    status,\n                    name\n                )\n\n            except Exception as exc:\n\n                print(\n                    f\"❌ Could not live-update \"\n                    f\"source for {name}: \"\n                    f\"{exc}\"\n                )\n'''
-          new = '''            try:\n\n                update_source_student_status(\n                    job,\n                    student,\n                    status,\n                    name\n                )\n\n            except Exception as exc:\n\n                print(\n                    f\"❌ Could not live-update source for {name}: \"\n                    f\"{type(exc).__name__}: {exc}\"\n                )\n                traceback.print_exc()\n'''
-          if old not in s:\n              raise SystemExit("source update error block not found")\n          s = s.replace(old, new, 1)
-
           compile(s, "worker.py", "exec")
           p.write_text(s, encoding="utf-8")
-          print("worker.py Excel live-update repair compiled successfully")
+          print("Excel worker patch compiled successfully")
           PY
-
       - name: Verify
         run: python -m py_compile worker.py
-
-      - name: Commit repaired worker and remove trigger/workflow
+      - name: Commit repaired worker and remove repair files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
