@@ -5,6 +5,7 @@ and writes one live progress row per student. Technical failures are isolated pe
 student and the job is always finalized instead of being left in processing.
 """
 
+import io
 import json
 import os
 import random
@@ -21,6 +22,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
+import openpyxl
 from cryptography.fernet import Fernet
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException, WebDriverException
