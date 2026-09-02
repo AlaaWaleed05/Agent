@@ -1,27 +1,28 @@
-name: Apply live table
+name: Validate Aivora
+
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+
 permissions:
-  contents: write
+  contents: read
+
 jobs:
-  apply:
-    if: github.actor != 'github-actions[bot]'
+  validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
-          ref: main
-      - run: python scripts/live_progress_patch.py
-      - run: python scripts/fallback_email_patch.py
-      - run: python scripts/worker_timing_patch.py
-      - run: python scripts/hide_technical_errors.py
-      - run: python scripts/office_update_ui_patch.py
-      - run: python -m py_compile 'streamlit_app (7).py'
-      - run: python -m py_compile worker.py
-      - run: git config user.name github-actions[bot]
-      - run: git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-      - run: git add 'streamlit_app (7).py' worker.py scripts/worker_timing_patch.py scripts/hide_technical_errors.py scripts/office_update_ui_patch.py
-      - run: git commit -m 'Apply automation patches without resetting app' || true
-      - run: git push
+          python-version: '3.11'
+
+      - name: Compile Streamlit app
+        run: python -m py_compile 'streamlit_app (7).py'
+
+      - name: Compile Worker
+        run: python -m py_compile worker.py
