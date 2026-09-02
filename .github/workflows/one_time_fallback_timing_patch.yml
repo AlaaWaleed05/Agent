@@ -22,22 +22,22 @@ jobs:
           p = Path('streamlit_app (7).py')
           s = p.read_text(encoding='utf-8')
 
-          needle = 'WORKER_WAIT_SECONDS = 30\nTECH_FAILURE_STATUS = "تعذر فحص الطالب حاليًا"'
-          repl = '''WORKER_WAIT_SECONDS = 30
+          constants = '''WORKER_WAIT_SECONDS = 30
           # Keep fallback pacing aligned with the Worker timing policy.
           LOGIN_PAGE_DELAY_MIN, LOGIN_PAGE_DELAY_MAX = 0.8, 1.5
           POST_LOGIN_DELAY_SECONDS = 1.0
           INBOX_DELAY_MIN, INBOX_DELAY_MAX = 0.7, 1.5
           STUDENT_DELAY_MIN, STUDENT_DELAY_MAX = 4, 8
           TECH_FAILURE_STATUS = "تعذر فحص الطالب حاليًا"'''
-          if needle not in s:
+          old_constants = 'WORKER_WAIT_SECONDS = 30\nTECH_FAILURE_STATUS = "تعذر فحص الطالب حاليًا"'
+          if old_constants not in s:
               raise SystemExit('timing constants insertion point not found')
-          s = s.replace(needle, repl, 1)
+          s = s.replace(old_constants, constants, 1)
 
-          needle = '''def safe_log(message):
+          helper_old = '''def safe_log(message):
               print(f"[Aivora] {message}")
           '''
-          repl = '''def safe_log(message):
+          helper_new = '''def safe_log(message):
               print(f"[Aivora] {message}")
 
 
@@ -46,64 +46,82 @@ jobs:
               import random
               time.sleep(random.uniform(a, b))
           '''
-          if needle not in s:
+          if helper_old not in s:
               raise SystemExit('fallback_delay insertion point not found')
-          s = s.replace(needle, repl, 1)
+          s = s.replace(helper_old, helper_new, 1)
 
-          old = '''                    password = Fernet(key.encode()).decrypt(str(student["encrypted_password"]).encode()).decode()
-                      session, token, error = _legacy_api_login(str(student["login_identifier"]).strip(), password)
-                      if error:
-                          status = "فشل تسجيل الدخول"
-                      else:
-                          status = _legacy_api_get_status(session, token)'''
-          new = '''                    password = Fernet(key.encode()).decrypt(str(student["encrypted_password"]).encode()).decode()
+          start = s.index('def _run_legacy_api_fallback(job_id):')
+          end = s.index('\n\ndef _background_update_job(job_id, encryption_key):', start)
+          fallback = '''def _run_legacy_api_fallback(job_id):
+              """Old API path with the same pacing policy used by the Worker."""
+              try:
+                  client = db()
+                  key = os.getenv("STUDENT_PASSWORD_ENCRYPTION_KEY")
+                  if not key:
+                      raise RuntimeError("encryption_key_missing")
+                  students = client.table("student_records").select("*").eq("office_id", job_id["office_id"]).eq("data_source_id", job_id["data_source_id"]).order("source_row_number").execute().data or []
+                  unique = {}
+                  for student in students:
+                      key_id = str(student.get("login_identifier") or student.get("student_name") or "").strip().lower()
+                      if key_id:
+                          unique[key_id] = student
+                  students = list(unique.values())
+                  total = len(students)
+                  if not total:
+                      client.table("jobs").update({"status": "done", "finished_at": now_iso()}).eq("id", job_id["id"]).execute()
+                      return
 
-                      # Match the Worker's login-page pacing before starting the login request.
-                      fallback_delay(LOGIN_PAGE_DELAY_MIN, LOGIN_PAGE_DELAY_MAX)
-                      session, token, error = _legacy_api_login(str(student["login_identifier"]).strip(), password)
-                      if error:
-                          status = "فشل تسجيل الدخول"
-                      else:
-                          # The Worker waits for the login transition before opening inbox.
-                          time.sleep(POST_LOGIN_DELAY_SECONDS)
-                          # Match the Worker's inbox navigation delay before reading status.
-                          fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
-                          status = _legacy_api_get_status(session, token)'''
-          if old not in s:
-              raise SystemExit('fallback API flow insertion point not found')
-          s = s.replace(old, new, 1)
+                  for index, student in enumerate(students, 1):
+                      name = str(student.get("student_name") or student.get("login_identifier") or "طالب").strip()
+                      current = str(student.get("application_status") or "").strip()
+                      status = current or "لم يتم الفحص بعد"
+                      session = None
+                      try:
+                          if current in FINAL_STATUSES:
+                              status = current
+                          else:
+                              password = Fernet(key.encode()).decrypt(str(student["encrypted_password"]).encode()).decode()
 
-          needle = '''            finally:
-                  _legacy_api_logout(session)
+                              # Same delay used by the Worker after opening the login page.
+                              fallback_delay(LOGIN_PAGE_DELAY_MIN, LOGIN_PAGE_DELAY_MAX)
+                              session, token, error = _legacy_api_login(str(student["login_identifier"]).strip(), password)
+                              if error:
+                                  status = "فشل تسجيل الدخول"
+                              else:
+                                  # Same login-transition wait used by the Worker before continuing.
+                                  time.sleep(POST_LOGIN_DELAY_SECONDS)
+                                  # Same inbox-navigation delay used by the Worker.
+                                  fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
+                                  status = _legacy_api_get_status(session, token)
+                      except Exception as exc:
+                          status = TECH_FAILURE_STATUS
+                          safe_log(f"fallback student error {student.get('id')}: {type(exc).__name__}: {exc}")
+                      finally:
+                          _legacy_api_logout(session)
+                          if session is not None:
+                              # Same short pause used by the Worker after logout.
+                              fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
 
-              stamp = now_iso()'''
-          repl = '''            finally:
-                  _legacy_api_logout(session)
-                  if session is not None:
-                      # Match the Worker's post-logout pause.
-                      fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
+                      stamp = now_iso()
+                      try:
+                          client.table("student_records").update({"application_status": status, "status_updated_at": stamp, "updated_at": stamp}).eq("id", student["id"]).execute()
+                          client.table("job_progress").insert({"job_id": job_id["id"], "student_index": index, "total": total, "student_name": name, "status": status}).execute()
+                      except Exception as exc:
+                          safe_log(f"fallback persistence error for {name}: {exc}")
 
-              stamp = now_iso()'''
-          if needle not in s:
-              raise SystemExit('logout timing insertion point not found')
-          s = s.replace(needle, repl, 1)
+                      # Exactly the same 4–8 second student-to-student delay as the Worker.
+                      if index < total:
+                          fallback_delay(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX)
 
-          needle = '''            except Exception as exc:
-                  safe_log(f"fallback persistence error for {name}: {exc}")
-
-          client.table("jobs").update'''
-          repl = '''            except Exception as exc:
-                  safe_log(f"fallback persistence error for {name}: {exc}")
-
-              # Same 4–8 second pause used by the Worker between students.
-              if index < total:
-                  fallback_delay(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX)
-
-          client.table("jobs").update'''
-          if needle not in s:
-              raise SystemExit('student delay insertion point not found')
-          s = s.replace(needle, repl, 1)
-
+                  client.table("jobs").update({"status": "done", "finished_at": now_iso(), "error": None}).eq("id", job_id["id"]).execute()
+              except Exception as exc:
+                  safe_log(f"fallback failed: {type(exc).__name__}: {exc}")
+                  try:
+                      db().table("jobs").update({"status": "failed", "finished_at": now_iso(), "error": str(exc)[:1000]}).eq("id", job_id["id"]).execute()
+                  except Exception as db_exc:
+                      safe_log(f"fallback job finalization failed: {db_exc}")
+          '''
+          s = s[:start] + fallback.rstrip() + s[end:]
           p.write_text(s, encoding='utf-8')
           PY
 
