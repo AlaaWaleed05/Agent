@@ -1,0 +1,65 @@
+name: Fix worker fallback architecture
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Patch worker
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('worker.py')
+          s = p.read_text(encoding='utf-8')
+
+          # Remove the per-student HTTP/API fallback completely.
+          s = s.replace('import requests\n', '')
+          s = s.replace('BASE_URL = "https://apiadm.study-in-egypt.gov.eg/api"\n', '')
+
+          start = s.find('# ============================================================\n# RELIABLE HTTP FALLBACK FOR A STUDENT')
+          if start != -1:
+              end = s.find('# ============================================================\n# SELENIUM', start)
+              if end == -1:
+                  raise SystemExit('Could not find end of HTTP fallback section')
+              s = s[:start] + s[end:]
+
+          # Replace the technical-error branch in process_job with Selenium-only retry.
+          old_start = s.find('            # ====================================================\n            # TECHNICAL FAILURE\n')
+          if old_start == -1:
+              raise SystemExit('Could not find technical failure block')
+          old_end = s.find('            # ====================================================\n            # SAVE TO SUPABASE\n', old_start)
+          if old_end == -1:
+              raise SystemExit('Could not find end of technical failure block')
+
+          new_block = '''            # ====================================================\n            # TECHNICAL FAILURE\n            #\n            # IMPORTANT: A per-student Selenium failure NEVER\n            # triggers the API fallback. The student is queued\n            # for one Selenium retry pass at the end of the job.\n            # ====================================================\n\n            if technical_error:\n\n                status = TECH_FAILURE_STATUS\n                retry_students.append((index, student, name))\n\n                print(\n                    f"⚠️ Technical error for {name}: "\n                    f"{technical_error}; queued for Selenium retry pass"\n                )\n\n                # Keep the same browser instance. Do not restart Chrome\n                # for an individual student failure.\n                needs_browser_restart = False\n\n'''
+          s = s[:old_start] + new_block + s[old_end:]
+
+          # Make the retry failure explicit: it remains the technical status.
+          if 'legacy_check_student_status' in s or '_legacy_api_' in s or 'BASE_URL' in s or 'requests' in s:
+              raise SystemExit('HTTP fallback symbols still remain in worker.py')
+
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Verify
+        run: |
+          python -m py_compile worker.py
+          ! grep -nE 'legacy_check_student_status|_legacy_api_|BASE_URL|import requests|HTTP fallback succeeded' worker.py
+          grep -n 'retry_students.append' worker.py
+          grep -n 'TECH_FAILURE_STATUS' worker.py
+
+      - name: Commit application change and remove patcher
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add worker.py
+          git commit -m 'Remove per-student API fallback from worker' || exit 0
+          git push
