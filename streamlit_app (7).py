@@ -44,6 +44,7 @@ FINAL_STATUSES = {
     "مرفوض نهائيا", "مرفوض", "خالص",
 }
 
+
 ADMIN_USERNAME = st.secrets.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "admin123")
 
@@ -553,6 +554,26 @@ def _claim_fallback_job(job_id):
     return rows[0] if rows else None
 
 
+def _job_is_cancelled(job_id):
+    try:
+        job = get_job(job_id.get("id") if isinstance(job_id, dict) else job_id)
+        return not job or str(job.get("status") or "") == "cancelled"
+    except Exception as exc:
+        safe_log(f"job cancellation check failed: {type(exc).__name__}: {exc}")
+        return False
+
+
+def _cancellable_delay(job_id, a, b):
+    import random
+    remaining = random.uniform(a, b)
+    end = time.monotonic() + remaining
+    while time.monotonic() < end:
+        if _job_is_cancelled(job_id):
+            return False
+        time.sleep(min(0.5, max(0.0, end - time.monotonic())))
+    return not _job_is_cancelled(job_id)
+
+
 def _run_legacy_api_fallback(job_id):
     """Old API path with the same pacing policy used by the Worker."""
     try:
@@ -571,12 +592,16 @@ def _run_legacy_api_fallback(job_id):
         random.shuffle(students)
         total = len(students)
         if not total:
-            client.table("jobs").update({"status": "done", "finished_at": now_iso()}).eq("id", job_id["id"]).execute()
+            if _job_is_cancelled(job_id):
+                return
+            client.table("jobs").update({"status": "done", "finished_at": now_iso()}).eq("id", job_id["id"]).eq("status", "processing").execute()
             return
 
         retry_students = []
 
         for index, student in enumerate(students, 1):
+            if _job_is_cancelled(job_id):
+                return
             name = str(student.get("student_name") or student.get("login_identifier") or "طالب").strip()
             current = str(student.get("application_status") or "").strip()
             status = current or "لم يتم الفحص بعد"
@@ -588,15 +613,20 @@ def _run_legacy_api_fallback(job_id):
                     password = Fernet(key.encode()).decrypt(str(student["encrypted_password"]).encode()).decode()
 
                     # Same delay used by the Worker after opening the login page.
-                    fallback_delay(LOGIN_PAGE_DELAY_MIN, LOGIN_PAGE_DELAY_MAX)
+                    if not _cancellable_delay(job_id, LOGIN_PAGE_DELAY_MIN, LOGIN_PAGE_DELAY_MAX):
+                        return
                     session, token, error = _legacy_api_login(str(student["login_identifier"]).strip(), password)
                     if error:
                         status = "فشل تسجيل الدخول"
                     else:
                         # Same login-transition wait used by the Worker before continuing.
-                        time.sleep(POST_LOGIN_DELAY_SECONDS)
+                        if _job_is_cancelled(job_id):
+                            return
+                        if not _cancellable_delay(job_id, POST_LOGIN_DELAY_SECONDS, POST_LOGIN_DELAY_SECONDS):
+                            return
                         # Same inbox-navigation delay used by the Worker.
-                        fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
+                        if not _cancellable_delay(job_id, INBOX_DELAY_MIN, INBOX_DELAY_MAX):
+                            return
                         status = _legacy_api_get_status(session, token)
             except Exception as exc:
                 status = TECH_FAILURE_STATUS
@@ -606,7 +636,11 @@ def _run_legacy_api_fallback(job_id):
                 _legacy_api_logout(session)
                 if session is not None:
                     # Same short pause used by the Worker after logout.
-                    fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
+                    if not _cancellable_delay(job_id, INBOX_DELAY_MIN, INBOX_DELAY_MAX):
+                        return
+
+            if _job_is_cancelled(job_id):
+                return
 
             stamp = now_iso()
             try:
@@ -617,21 +651,29 @@ def _run_legacy_api_fallback(job_id):
 
             # Exactly the same 4–8 second student-to-student delay as the Worker.
             if index < total:
-                fallback_delay(STUDENT_DELAY_MIN, STUDENT_DELAY_MAX)
+                if not _cancellable_delay(job_id, STUDENT_DELAY_MIN, STUDENT_DELAY_MAX):
+                    return
 
         # Retry technical failures once after the first full pass.
         for index, student, name in retry_students:
+            if _job_is_cancelled(job_id):
+                return
             retry_status = TECH_FAILURE_STATUS
             session = None
             try:
                 password = Fernet(key.encode()).decrypt(str(student["encrypted_password"]).encode()).decode()
-                fallback_delay(1.0, 2.0)
+                if not _cancellable_delay(job_id, 1.0, 2.0):
+                    return
                 session, token, error = _legacy_api_login(str(student["login_identifier"]).strip(), password)
                 if error:
                     retry_status = "فشل تسجيل الدخول"
                 else:
-                    time.sleep(POST_LOGIN_DELAY_SECONDS)
-                    fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
+                    if _job_is_cancelled(job_id):
+                        return
+                    if not _cancellable_delay(job_id, POST_LOGIN_DELAY_SECONDS, POST_LOGIN_DELAY_SECONDS):
+                        return
+                    if not _cancellable_delay(job_id, INBOX_DELAY_MIN, INBOX_DELAY_MAX):
+                        return
                     retry_status = _legacy_api_get_status(session, token)
             except Exception as exc:
                 retry_status = TECH_FAILURE_STATUS
@@ -639,7 +681,11 @@ def _run_legacy_api_fallback(job_id):
             finally:
                 _legacy_api_logout(session)
                 if session is not None:
-                    fallback_delay(INBOX_DELAY_MIN, INBOX_DELAY_MAX)
+                    if not _cancellable_delay(job_id, INBOX_DELAY_MIN, INBOX_DELAY_MAX):
+                        return
+
+            if _job_is_cancelled(job_id):
+                return
 
             stamp = now_iso()
             try:
@@ -648,14 +694,20 @@ def _run_legacy_api_fallback(job_id):
             except Exception as exc:
                 safe_log(f"fallback retry persistence error for {name}: {exc}")
 
+        if _job_is_cancelled(job_id):
+            return
         finalize_job_output(job_id)
-        client.table("jobs").update({"status": "done", "finished_at": now_iso(), "error": None}).eq("id", job_id["id"]).execute()
+        if _job_is_cancelled(job_id):
+            return
+        client.table("jobs").update({"status": "done", "finished_at": now_iso(), "error": None}).eq("id", job_id["id"]).eq("status", "processing").execute()
     except Exception as exc:
         safe_log(f"fallback failed: {type(exc).__name__}: {exc}")
         try:
-            db().table("jobs").update({"status": "failed", "finished_at": now_iso(), "error": str(exc)[:1000]}).eq("id", job_id["id"]).execute()
+            if not _job_is_cancelled(job_id):
+                db().table("jobs").update({"status": "failed", "finished_at": now_iso(), "error": str(exc)[:1000]}).eq("id", job_id["id"]).eq("status", "processing").execute()
         except Exception as db_exc:
             safe_log(f"fallback job finalization failed: {db_exc}")
+
 
 def _background_update_job(job_id, encryption_key):
     try:
@@ -675,7 +727,8 @@ def _background_update_job(job_id, encryption_key):
     except Exception as exc:
         safe_log(f"background update failed: {type(exc).__name__}: {exc}")
         try:
-            db().table("jobs").update({"status": "failed", "finished_at": now_iso(), "error": str(exc)[:1000]}).eq("id", job_id).execute()
+            if not _job_is_cancelled(job_id):
+                db().table("jobs").update({"status": "failed", "finished_at": now_iso(), "error": str(exc)[:1000]}).eq("id", job_id).eq("status", "pending").execute()
         except Exception as db_exc:
             safe_log(f"background finalization failed: {db_exc}")
 
@@ -687,7 +740,21 @@ def start_update():
     st.session_state.update_start_requested = True
 
 
+def cancel_active_jobs(office_id):
+    try:
+        db().table("jobs").update({
+            "status": "cancelled",
+            "finished_at": now_iso(),
+            "error": None,
+        }).eq("office_id", office_id).in_("status", ["pending", "processing"]).execute()
+    except Exception as exc:
+        safe_log(f"job cancellation failed: {type(exc).__name__}: {exc}")
+
+
 def reset_session_on_logout():
+    office = st.session_state.get("office")
+    if office and office.get("id"):
+        cancel_active_jobs(office["id"])
     st.session_state.clear()
     st.rerun()
 
@@ -904,6 +971,7 @@ if st.session_state.update_start_requested and not st.session_state.active_job_i
         finally:
             st.session_state.job_preparing = False
 
+
 @st.fragment(run_every=2)
 def render_processing():
     job_id = st.session_state.get("active_job_id")
@@ -976,6 +1044,7 @@ def render_processing():
         st.markdown('<div class="lock-box">🔒 تم تشغيل تحديث بالفعل في هذه الجلسة. لو عايزة تبدئي تحديث جديد، سجّلي خروج وادخلي تاني.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+
 render_processing()
 
 # Search
@@ -992,6 +1061,6 @@ if search_query:
         st.info("مفيش طالب بالاسم ده.")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Logout is intentionally at the bottom. Logging out clears the session lock.
+# Logout is intentionally at the bottom. Logging out cancels any active job and clears the session lock.
 if st.button("تسجيل الخروج", key="logout_main"):
     reset_session_on_logout()
