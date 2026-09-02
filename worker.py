@@ -1413,6 +1413,9 @@ def selenium_go_to_inbox(driver):
 
         user_menu.click()
 
+        # The menu itself is only a click: keep this pause very short.
+        human_delay(0.20, 0.50)
+
         # اضغط "طلباتي"
         my_requests = wait.until(
             EC.element_to_be_clickable(
@@ -1427,10 +1430,11 @@ def selenium_go_to_inbox(driver):
 
         my_requests.click()
 
-        # انتظر الصفحة الجديدة
+        # Do not add a long artificial pause here. Selenium will still
+        # wait for the actual requests table below.
         human_delay(
-            0.7,
-            1.5
+            0.35,
+            0.80
         )
 
         return (
@@ -1523,6 +1527,10 @@ def selenium_get_status(driver):
             if status:
                 statuses.append(status)
 
+        # Small random pause after reading the status before logout.
+        if statuses:
+            human_delay(0.20, 0.55)
+
         return (
             statuses[0]
             if statuses
@@ -1589,9 +1597,10 @@ def selenium_logout(driver):
 
         logout.click()
 
+        # Logout is also just a click; keep the human pause short.
         human_delay(
-            0.7,
-            1.5
+            0.20,
+            0.55
         )
 
     except Exception as exc:
