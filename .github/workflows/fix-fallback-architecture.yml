@@ -1,0 +1,54 @@
+name: Tighten fallback architecture
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Patch fallback orchestration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('streamlit_app (7).py')
+          s = p.read_text(encoding='utf-8')
+
+          old = '''        # Try to claim only if the job is still pending.\n        claimed = _claim_fallback_job(\n            job_id\n        )\n\n        if claimed:\n\n            _run_legacy_api_fallback(\n                claimed\n            )\n'''
+
+          new = '''        # IMPORTANT: the fallback is an emergency path only.\n        # Never compete with a real Selenium worker that is already\n        # processing another job. If any real worker-owned job is\n        # currently processing, leave this job pending so the worker\n        # can claim it when it becomes free.\n        try:\n            active_worker_jobs = (\n                db()\n                .table("jobs")\n                .select("id,claimed_by,status")\n                .eq("status", "processing")\n                .neq("claimed_by", "streamlit-fallback")\n                .limit(1)\n                .execute()\n                .data\n                or []\n            )\n        except Exception as worker_check_exc:\n            safe_log(\n                f"Could not verify active worker before fallback: "\n                f"{type(worker_check_exc).__name__}: {worker_check_exc}"\n            )\n            return\n\n        if active_worker_jobs:\n            safe_log(\n                f"Real worker is active; leaving job {job_id} pending "\n                f"for the worker queue."\n            )\n            return\n\n        # No worker-owned processing job is visible. Try to claim only\n        # if this job is still pending. This keeps the emergency fallback\n        # from racing a real worker for the same job.\n        claimed = _claim_fallback_job(\n            job_id\n        )\n\n        if claimed:\n\n            _run_legacy_api_fallback(\n                claimed\n            )\n'''
+
+          if old not in s:
+              raise SystemExit('Expected fallback claim block was not found')
+
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Verify
+        run: |
+          python -m py_compile 'streamlit_app (7).py'
+          grep -n 'active_worker_jobs' 'streamlit_app (7).py'
+          grep -n 'Real worker is active' 'streamlit_app (7).py'
+
+      - name: Commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add 'streamlit_app (7).py'
+          if git diff --cached --quiet; then
+            echo 'No changes needed.'
+            exit 0
+          fi
+          git commit -m 'Prevent fallback from competing with active worker'
+          git push
