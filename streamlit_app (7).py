@@ -1757,7 +1757,148 @@ def cancel_job(
             f"cancel job failed: {exc}"
         )
 
+def cancel_all_office_jobs(office_id):
 
+    if not office_id:
+        return False
+
+    try:
+
+        # =====================================================
+        # CANCEL ALL ACTIVE JOBS FOR THIS OFFICE
+        # =====================================================
+
+        response = (
+            db()
+            .table("jobs")
+            .update({
+                "status": "cancelled",
+                "finished_at": now_iso(),
+                "error": "office_logout"
+            })
+            .eq(
+                "office_id",
+                office_id
+            )
+            .in_(
+                "status",
+                [
+                    "pending",
+                    "processing"
+                ]
+            )
+            .select("id,status")
+            .execute()
+        )
+
+        cancelled = response.data or []
+
+        safe_log(
+            f"Office {office_id}: "
+            f"cancelled {len(cancelled)} active job(s) on logout."
+        )
+
+        # =====================================================
+        # VERIFY:
+        # Make sure there is NO pending/processing job left.
+        # =====================================================
+
+        remaining = (
+            db()
+            .table("jobs")
+            .select("id,status")
+            .eq(
+                "office_id",
+                office_id
+            )
+            .in_(
+                "status",
+                [
+                    "pending",
+                    "processing"
+                ]
+            )
+            .execute()
+            .data
+            or []
+        )
+
+        if remaining:
+
+            safe_log(
+                f"WARNING: Office {office_id} still has "
+                f"{len(remaining)} active job(s) after logout."
+            )
+
+            # Retry once in case another worker/request
+            # changed the job during the first update.
+            (
+                db()
+                .table("jobs")
+                .update({
+                    "status": "cancelled",
+                    "finished_at": now_iso(),
+                    "error": "office_logout"
+                })
+                .eq(
+                    "office_id",
+                    office_id
+                )
+                .in_(
+                    "status",
+                    [
+                        "pending",
+                        "processing"
+                    ]
+                )
+                .execute()
+            )
+
+            # Verify one final time.
+            remaining = (
+                db()
+                .table("jobs")
+                .select("id,status")
+                .eq(
+                    "office_id",
+                    office_id
+                )
+                .in_(
+                    "status",
+                    [
+                        "pending",
+                        "processing"
+                    ]
+                )
+                .execute()
+                .data
+                or []
+            )
+
+        if remaining:
+
+            safe_log(
+                f"ERROR: Could not cancel all active jobs "
+                f"for office {office_id}."
+            )
+
+            return False
+
+        safe_log(
+            f"Office {office_id}: "
+            f"logout cancellation verified successfully."
+        )
+
+        return True
+
+    except Exception as exc:
+
+        safe_log(
+            f"cancel all office jobs failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+        return False
 def get_job_progress_rows(job_id):
 
     rows = (
@@ -3296,23 +3437,31 @@ def reset_session_on_logout():
         "office"
     )
 
-    active_job_id = st.session_state.get(
-        "active_job_id"
-    )
-
     # =====================================================
-    # CANCEL ONLY THIS OFFICE'S ACTIVE JOB
+    # CANCEL ALL ACTIVE JOBS FOR THIS OFFICE
     # =====================================================
 
-    if office and active_job_id:
+    if office:
 
-        cancel_job(
-            job_id=active_job_id,
-            office_id=office["id"]
-        )
+        office_id = office.get("id")
+
+        if office_id:
+
+            cancelled = cancel_all_office_jobs(
+                office_id
+            )
+
+            if not cancelled:
+
+                st.error(
+                    "تعذر إيقاف التحديث بشكل آمن. "
+                    "حاولي تسجيل الخروج مرة تانية."
+                )
+
+                return
 
     # =====================================================
-    # NEW LOGIN WILL START A NEW JOB
+    # CLEAR THIS STREAMLIT SESSION
     # =====================================================
 
     st.session_state.clear()
@@ -3813,7 +3962,7 @@ if (
                     )
 
                     if ok:
-
+                        
                         st.session_state.logged_in = True
 
                         st.session_state.office = result
@@ -3821,6 +3970,18 @@ if (
                         st.session_state.update_locked = False
 
                         st.session_state.active_job_id = None
+
+                        st.session_state.update_start_requested = False
+
+                        st.session_state.job_preparing = False
+
+                        st.session_state.pending_file_bytes = None
+
+                        st.session_state.pending_filename = ""
+
+                        st.session_state.final_file_bytes_cache = None
+
+                        st.session_state.final_file_cache_id = None
 
                         st.rerun()
 
@@ -4347,27 +4508,30 @@ if (
     and not st.session_state.job_preparing
 ):
 
-    running = (
-        db()
-        .table("jobs")
-        .select("id")
-        .eq(
-            "office_id",
-            office_id
-        )
-        .in_(
-            "status",
-            [
-                "pending",
-                "processing"
-            ]
-        )
-        .limit(1)
-        .execute()
-        .data
-        or []
+running = (
+    db()
+    .table("jobs")
+    .select("id,status,created_at,started_at")
+    .eq(
+        "office_id",
+        office_id
     )
-
+    .in_(
+        "status",
+        [
+            "pending",
+            "processing"
+        ]
+    )
+    .order(
+        "created_at",
+        desc=True
+    )
+    .limit(1)
+    .execute()
+    .data
+    or []
+)
     if running:
 
         st.session_state.update_start_requested = False
