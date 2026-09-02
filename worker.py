@@ -2035,11 +2035,6 @@ def process_job(job):
 
             # ====================================================
             # CHECK BEFORE STARTING A NEW STUDENT
-            #
-            # This is the important boundary.
-            #
-            # If office logged out while the previous student
-            # was running, we DO NOT start this student.
             # ====================================================
 
             if job_is_cancelled(
@@ -2079,22 +2074,19 @@ def process_job(job):
             technical_error = None
 
             # ====================================================
-            # NEW:
+            # IMPORTANT:
             #
-            # Do NOT restart Chrome immediately when a technical
-            # error happens.
+            # Browser restart is delayed until AFTER:
             #
-            # The current student's result MUST first be saved
-            # to Supabase + Excel/Google Sheet + progress.
-            #
-            # Only after the current student is completely saved
-            # will Chrome be restarted.
+            # 1. Logout
+            # 2. Supabase update
+            # 3. Excel/Google Sheet update
+            # 4. Progress update
+            # 5. Cancellation check
             # ====================================================
 
             needs_browser_restart = False
 
-            # Track whether this student
-            # successfully logged in.
             logged_in = False
 
             # ====================================================
@@ -2105,9 +2097,6 @@ def process_job(job):
 
                 if current in FINAL_STATUSES:
 
-                    # Final applications are not
-                    # logged into again.
-
                     status = current
 
                 else:
@@ -2117,10 +2106,6 @@ def process_job(job):
                             "encrypted_password"
                         ]
                     )
-
-                    # --------------------------------------------
-                    # LOGIN
-                    # --------------------------------------------
 
                     ok, technical, error = (
                         selenium_login(
@@ -2149,12 +2134,7 @@ def process_job(job):
 
                     else:
 
-                        # Login succeeded.
                         logged_in = True
-
-                        # ----------------------------------------
-                        # GO TO MY REQUESTS
-                        # ----------------------------------------
 
                         ok2, error2 = (
                             selenium_go_to_inbox(
@@ -2167,10 +2147,6 @@ def process_job(job):
                             technical_error = error2
 
                         else:
-
-                            # ------------------------------------
-                            # GET STATUS
-                            # ------------------------------------
 
                             (
                                 status_text,
@@ -2186,9 +2162,7 @@ def process_job(job):
 
                             else:
 
-                                status = (
-                                    status_text
-                                )
+                                status = status_text
 
             except Exception as exc:
 
@@ -2247,22 +2221,15 @@ def process_job(job):
                     f"{technical_error}"
                 )
 
-                # =================================================
                 # IMPORTANT:
+                # DO NOT restart Chrome yet.
                 #
-                # DO NOT restart Chrome here.
-                #
-                # The current student's result has NOT been saved
-                # yet. We first save DB + source + progress below.
-                #
-                # After all those operations are complete,
-                # the browser will be restarted.
-                # =================================================
+                # The student MUST first be saved everywhere.
 
                 needs_browser_restart = True
 
             # ====================================================
-            # UPDATE DATABASE
+            # SAVE TO SUPABASE
             # ====================================================
 
             try:
@@ -2282,9 +2249,6 @@ def process_job(job):
 
             # ====================================================
             # LIVE SOURCE UPDATE
-            #
-            # Excel / Google Sheet gets updated immediately
-            # after THIS student.
             # ====================================================
 
             try:
@@ -2337,17 +2301,9 @@ def process_job(job):
             )
 
             # ====================================================
-            # IMPORTANT CANCELLATION CHECK
+            # CANCELLATION CHECK
             #
-            # The current student is now COMPLETELY finished:
-            #
-            # 1. Selenium check
-            # 2. Logout
-            # 3. DB update
-            # 4. Excel/Google Sheet update
-            # 5. Progress update
-            #
-            # ONLY NOW do we check cancellation.
+            # Current student is now finished.
             # ====================================================
 
             if job_is_cancelled(
@@ -2369,13 +2325,9 @@ def process_job(job):
                 return
 
             # ====================================================
-            # NEW:
+            # RESTART CHROME ONLY NOW
             #
-            # NOW that the current student has been completely
-            # saved, restart Chrome if the previous check had a
-            # technical failure.
-            #
-            # This prevents losing the current student's result.
+            # The current student's result is already saved.
             # ====================================================
 
             if needs_browser_restart:
@@ -2392,8 +2344,9 @@ def process_job(job):
 
                 driver = None
 
-                # Check cancellation BEFORE starting another
-                # browser. If office logged out, do not continue.
+                # Cancellation must be checked BEFORE
+                # creating a new browser.
+
                 if job_is_cancelled(
                     job_id
                 ):
@@ -2425,27 +2378,10 @@ def process_job(job):
                         f"{restart_exc}"
                     )
 
-                    # IMPORTANT:
-                    # Do NOT mark remaining students.
+                    # Leave driver=None.
                     #
-                    # We also DO NOT immediately raise here.
-                    # The retry pass below will try to create
-                    # Chrome again before retrying technical
-                    # failures.
-                    #
-                    # If Chrome still cannot start there,
-                    # the job will fail WITHOUT touching
-                    # unprocessed students.
-
-            # ====================================================
-            # IMPORTANT:
-            #
-            # If Chrome restart failed, we DO NOT touch any
-            # unprocessed students.
-            #
-            # The current student has already been saved.
-            # The retry pass will try to recover.
-            # ====================================================
+                    # Do NOT touch any unprocessed student.
+                    # Retry pass will attempt recovery.
 
             # ====================================================
             # DELAY BEFORE NEXT STUDENT
@@ -2458,8 +2394,6 @@ def process_job(job):
                     STUDENT_DELAY_MAX,
                     "Pause before next student"
                 )
-
-                # Check again after delay.
 
                 if job_is_cancelled(
                     job_id
@@ -2478,8 +2412,6 @@ def process_job(job):
         # ========================================================
 
         if retry_students:
-
-            # Check cancellation before starting retry pass.
 
             if job_is_cancelled(
                 job_id
@@ -2511,14 +2443,6 @@ def process_job(job):
                         f"Chrome for retry "
                         f"pass: {exc}"
                     )
-
-                    # IMPORTANT:
-                    # No student is touched here.
-                    #
-                    # If we cannot start Chrome at all,
-                    # the job fails. Students already processed
-                    # remain saved, and students not yet processed
-                    # remain untouched.
 
                     raise RuntimeError(
                         "chrome_unavailable_for_retry_pass"
@@ -2559,8 +2483,14 @@ def process_job(job):
 
                 logged_in = False
 
+                # IMPORTANT:
+                # This flag controls Chrome restart.
+                # It is intentionally set only after the retry
+                # has failed technically.
+                needs_browser_restart = False
+
                 # =================================================
-                # RETRY CURRENT STUDENT
+                # MAKE SURE CHROME EXISTS
                 # =================================================
 
                 if driver is None:
@@ -2586,6 +2516,10 @@ def process_job(job):
                     2.0,
                     f"Retrying {name}"
                 )
+
+                # =================================================
+                # RETRY CURRENT STUDENT
+                # =================================================
 
                 try:
 
@@ -2681,6 +2615,14 @@ def process_job(job):
                         f"{exc}"
                     )
 
+                    # IMPORTANT:
+                    # DO NOT restart Chrome here.
+                    #
+                    # We first save this retry result
+                    # everywhere.
+
+                    needs_browser_restart = True
+
                 finally:
 
                     # =========================================
@@ -2710,40 +2652,21 @@ def process_job(job):
                                 f"{logout_exc}"
                             )
 
-                # ---------------------------------------------
-                # RESTART AFTER RETRY TECHNICAL FAILURE
-                # ---------------------------------------------
-
-                if (
-                    retry_status
-                    == TECH_FAILURE_STATUS
-                ):
-
-                    safe_quit(
-                        driver
-                    )
-
-                    driver = None
-
-                    # IMPORTANT:
-                    # We do NOT immediately mark any other
-                    # students as failed.
-                    #
-                    # If there is another retry student,
-                    # the next iteration will try to create
-                    # Chrome again.
-                    try:
-
-                        driver = setup_browser()
-
-                    except Exception as restart_exc:
-
-                        print(
-                            f"❌ Chrome restart "
-                            f"after retry "
-                            f"failure failed: "
-                            f"{restart_exc}"
-                        )
+                # =================================================
+                # IMPORTANT:
+                #
+                # NO CHROME RESTART HERE.
+                #
+                # The retry result must first be saved:
+                #
+                # 1. Supabase
+                # 2. Excel / Google Sheet
+                # 3. Progress
+                # 4. processed
+                # 5. Cancellation check
+                #
+                # ONLY THEN restart Chrome.
+                # =================================================
 
                 # =================================================
                 # SAVE RETRY RESULT TO DB
@@ -2832,13 +2755,9 @@ def process_job(job):
                 )
 
                 # =================================================
-                # CHECK CANCELLATION AFTER CURRENT RETRY
+                # CANCELLATION CHECK
                 #
-                # Current retry is completely finished:
-                #
-                # logout + DB + source + progress.
-                #
-                # Only now stop.
+                # Retry student is now COMPLETELY saved.
                 # =================================================
 
                 if job_is_cancelled(
@@ -2852,6 +2771,68 @@ def process_job(job):
                     )
 
                     return
+
+                # =================================================
+                # NOW RESTART CHROME IF RETRY FAILED TECHNICALLY
+                #
+                # IMPORTANT:
+                # This is AFTER DB + source + progress.
+                # =================================================
+
+                if needs_browser_restart:
+
+                    print(
+                        f"🔄 Restarting Chrome "
+                        f"after saving retry "
+                        f"result for {name}..."
+                    )
+
+                    safe_quit(
+                        driver
+                    )
+
+                    driver = None
+
+                    # Check cancellation BEFORE
+                    # creating another browser.
+
+                    if job_is_cancelled(
+                        job_id
+                    ):
+
+                        print(
+                            f"🛑 Job {job_id} "
+                            f"was cancelled after "
+                            f"saving retry result "
+                            f"for {name}, "
+                            f"before Chrome restart."
+                        )
+
+                        return
+
+                    try:
+
+                        driver = setup_browser()
+
+                        print(
+                            f"    ✓ Chrome restarted "
+                            f"after retry of "
+                            f"{name}"
+                        )
+
+                    except Exception as restart_exc:
+
+                        print(
+                            f"❌ Chrome restart "
+                            f"after retry failure "
+                            f"failed: "
+                            f"{restart_exc}"
+                        )
+
+                        # Keep driver=None.
+                        #
+                        # If there are more retry students,
+                        # the job will stop WITHOUT touching them.
 
                 # =================================================
                 # IF CHROME FAILED TO RESTART
@@ -2984,14 +2965,6 @@ def process_job(job):
 
         # ========================================================
         # MARK DONE ONLY IF STILL PROCESSING
-        #
-        # The DB update itself contains:
-        #
-        # .eq("status", "processing")
-        #
-        # Therefore if Streamlit cancelled the job
-        # immediately before this update, the worker
-        # CANNOT change cancelled -> done.
         # ========================================================
 
         marked_done = (
@@ -3116,9 +3089,6 @@ def process_job(job):
 
         # ========================================================
         # DEVELOPER NOTIFICATION
-        #
-        # Only notify if this was an actual failure,
-        # not an office cancellation.
         # ========================================================
 
         try:
