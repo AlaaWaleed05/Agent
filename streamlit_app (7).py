@@ -431,6 +431,8 @@ def _run_legacy_api_fallback(job_id):
             if key_id:
                 unique[key_id] = student
         students = list(unique.values())
+        import random
+        random.shuffle(students)
         total = len(students)
         if not total:
             client.table("jobs").update({"status": "done", "finished_at": now_iso()}).eq("id", job_id["id"]).execute()

@@ -306,6 +306,7 @@ def process_job(job):
     processed = []
     try:
         students = get_students_for_job(job)
+        random.shuffle(students)
         total = len(students)
         if not total:
             set_job_status(job_id, "done")
