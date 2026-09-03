@@ -1,0 +1,359 @@
+name: Repair Excel preparation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Patch Excel job preparation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("streamlit_app (7).py")
+          s = p.read_text(encoding="utf-8")
+
+          old_import = '''def import_students(
+    office_id,
+    source_type,
+    source_name,
+    file_bytes=None,
+    source_url=None
+):
+
+    if source_type in {
+        "xlsx",
+        "xls",
+        "excel"
+    }:
+
+        records = parse_excel_bytes(
+            file_bytes
+        )
+
+    else:
+
+        rows = read_gsheet_rows(
+            source_url
+        )
+
+        if not rows:
+            raise ValueError(
+                "الشيت فاضي."
+            )
+
+        wb = openpyxl.Workbook()
+
+        ws = wb.active
+
+        for row in rows:
+            ws.append(row)
+
+        out = io.BytesIO()
+
+        wb.save(out)
+
+        records = parse_excel_bytes(
+            out.getvalue()
+        )
+
+    if not records:
+        raise ValueError(
+            "مش لاقي طلاب عندهم إيميل وباسورد صالحين."
+        )
+
+    encryption_key = st.secrets.get(
+        "STUDENT_PASSWORD_ENCRYPTION_KEY",
+        os.getenv(
+            "STUDENT_PASSWORD_ENCRYPTION_KEY"
+        )
+    )
+
+    source_type = (
+        "google_sheet"
+        if source_type in {
+            "gsheet",
+            "google_sheet"
+        }
+        else "excel"
+    )
+
+    file_path = None
+
+    if source_type == "excel":
+
+        if not file_bytes:
+            raise ValueError(
+                "ملف Excel غير موجود."
+            )
+
+        file_path = upload_to_drive(
+            file_bytes,
+            source_name,
+            ""
+        )
+
+    source = (
+        db()
+        .table("data_sources")
+        .insert({
+            "office_id": office_id,
+            "source_type": source_type,
+            "source_name": source_name,
+            "source_url": source_url,
+            "file_path": file_path,
+            "column_mapping": {},
+        })
+        .execute()
+        .data[0]
+    )
+
+    payload = [
+        {
+            "office_id": office_id,
+            "data_source_id": source["id"],
+            "source_row_number": r[
+                "source_row_number"
+            ],
+            "student_name": r[
+                "student_name"
+            ],
+            "login_identifier": r[
+                "login_identifier"
+            ],
+            "encrypted_password":
+                encrypt_password(
+                    r["password"],
+                    encryption_key
+                ),
+            "application_status": "",
+            "original_data": r[
+                "original_data"
+            ],
+            "updated_at": now_iso(),
+        }
+        for r in records
+    ]
+
+    (
+        db()
+        .table("student_records")
+        .insert(payload)
+        .execute()
+    )
+
+    return source, len(payload)
+'''
+
+          new_import = '''def import_students(
+    office_id,
+    source_type,
+    source_name,
+    file_bytes=None,
+    source_url=None
+):
+    """Import valid students and create their persistent source records.
+
+    Excel rows without both email and password are intentionally ignored.
+    Every stage is logged so a failed preparation cannot be hidden behind a
+    generic UI message.
+    """
+    stage = "start"
+    file_path = None
+    source = None
+
+    try:
+        if source_type in {"xlsx", "xls", "excel"}:
+            stage = "parse_excel"
+            if not file_bytes:
+                raise ValueError("ملف Excel غير موجود.")
+            records = parse_excel_bytes(file_bytes)
+        else:
+            stage = "read_google_sheet"
+            rows = read_gsheet_rows(source_url)
+            if not rows:
+                raise ValueError("الشيت فاضي.")
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            for row in rows:
+                ws.append(row)
+
+            out = io.BytesIO()
+            wb.save(out)
+
+            stage = "parse_google_sheet_rows"
+            records = parse_excel_bytes(out.getvalue())
+
+        safe_log(
+            f"import_students stage={stage} office={office_id} "
+            f"valid_students={len(records)} source={source_name}"
+        )
+
+        if not records:
+            raise ValueError(
+                "مش لاقي طلاب عندهم إيميل وباسورد صالحين."
+            )
+
+        encryption_key = st.secrets.get(
+            "STUDENT_PASSWORD_ENCRYPTION_KEY",
+            os.getenv("STUDENT_PASSWORD_ENCRYPTION_KEY", "")
+        )
+        if not encryption_key:
+            raise RuntimeError("student_password_encryption_key_missing")
+
+        source_type = (
+            "google_sheet"
+            if source_type in {"gsheet", "google_sheet"}
+            else "excel"
+        )
+
+        if source_type == "excel":
+            stage = "upload_excel_to_drive"
+            file_path = upload_to_drive(
+                file_bytes,
+                source_name or "students.xlsx",
+                ""
+            )
+            if not file_path:
+                raise RuntimeError("excel_drive_upload_returned_empty_id")
+
+        stage = "create_data_source"
+        response = (
+            db()
+            .table("data_sources")
+            .insert({
+                "office_id": office_id,
+                "source_type": source_type,
+                "source_name": source_name,
+                "source_url": source_url,
+                "file_path": file_path,
+                "column_mapping": {},
+            })
+            .execute()
+        )
+        source_rows = response.data or []
+        if not source_rows:
+            raise RuntimeError("data_source_insert_returned_empty")
+        source = source_rows[0]
+
+        stage = "encrypt_student_passwords"
+        payload = []
+        for r in records:
+            payload.append({
+                "office_id": office_id,
+                "data_source_id": source["id"],
+                "source_row_number": r["source_row_number"],
+                "student_name": r["student_name"],
+                "login_identifier": r["login_identifier"],
+                "encrypted_password": encrypt_password(
+                    r["password"],
+                    encryption_key
+                ),
+                "application_status": "",
+                "original_data": r["original_data"],
+                "updated_at": now_iso(),
+            })
+
+        stage = "insert_student_records"
+        student_response = (
+            db()
+            .table("student_records")
+            .insert(payload)
+            .execute()
+        )
+        inserted = student_response.data or []
+        if len(inserted) != len(payload):
+            raise RuntimeError(
+                f"student_records_insert_count_mismatch:{len(inserted)}/{len(payload)}"
+            )
+
+        safe_log(
+            f"import_students SUCCESS office={office_id} "
+            f"source_id={source['id']} students={len(payload)} "
+            f"drive_file={file_path or '-'}"
+        )
+        return source, len(payload)
+
+    except Exception as exc:
+        safe_log(
+            f"import_students FAILED stage={stage} office={office_id} "
+            f"source={source_name}: {type(exc).__name__}: {exc}"
+        )
+        import traceback
+        traceback.print_exc()
+        raise
+'''
+
+          if old_import not in s:
+              raise SystemExit("import_students block not found")
+          s = s.replace(old_import, new_import, 1)
+
+          old_except = '''        except Exception as exc:
+
+            safe_log(
+                f"job preparation failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+            st.session_state.update_start_requested = False
+
+            st.session_state.update_locked = False
+
+            st.error(
+                "تعذر تجهيز التحديث حاليًا. "
+                "حاولي مرة تانية."
+            )
+'''
+
+          new_except = '''        except Exception as exc:
+
+            import traceback
+            safe_log(
+                f"job preparation failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            traceback.print_exc()
+
+            st.session_state.update_start_requested = False
+            st.session_state.update_locked = False
+
+            st.error(
+                "تعذر تجهيز التحديث حاليًا. "
+                f"السبب: {type(exc).__name__}: {exc}"
+            )
+'''
+
+          if old_except not in s:
+              raise SystemExit("job preparation exception block not found")
+          s = s.replace(old_except, new_except, 1)
+
+          compile(s, "streamlit_app (7).py", "exec")
+          p.write_text(s, encoding="utf-8")
+          print("Excel preparation patch compiled successfully")
+          PY
+
+      - name: Verify
+        run: python -m py_compile "streamlit_app (7).py"
+
+      - name: Commit patch and remove workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "streamlit_app (7).py"
+          git rm -f .github/workflows/repair-excel-prep.yml
+          git commit -m "Fix Excel job preparation diagnostics"
+          git push origin main
