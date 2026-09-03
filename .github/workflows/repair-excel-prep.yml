@@ -1,7 +1,9 @@
 name: Repair Excel preparation
 
 on:
-  workflow_dispatch:
+  push:
+    paths:
+      - ".github/excel_prep_fix_trigger.txt"
 
 permissions:
   contents: write
@@ -165,16 +167,8 @@ jobs:
     file_bytes=None,
     source_url=None
 ):
-    """Import valid students and create their persistent source records.
-
-    Excel rows without both email and password are intentionally ignored.
-    Every stage is logged so a failed preparation cannot be hidden behind a
-    generic UI message.
-    """
+    """Import valid students and create their persistent source records."""
     stage = "start"
-    file_path = None
-    source = None
-
     try:
         if source_type in {"xlsx", "xls", "excel"}:
             stage = "parse_excel"
@@ -186,15 +180,12 @@ jobs:
             rows = read_gsheet_rows(source_url)
             if not rows:
                 raise ValueError("الشيت فاضي.")
-
             wb = openpyxl.Workbook()
             ws = wb.active
             for row in rows:
                 ws.append(row)
-
             out = io.BytesIO()
             wb.save(out)
-
             stage = "parse_google_sheet_rows"
             records = parse_excel_bytes(out.getvalue())
 
@@ -204,9 +195,7 @@ jobs:
         )
 
         if not records:
-            raise ValueError(
-                "مش لاقي طلاب عندهم إيميل وباسورد صالحين."
-            )
+            raise ValueError("مش لاقي طلاب عندهم إيميل وباسورد صالحين.")
 
         encryption_key = st.secrets.get(
             "STUDENT_PASSWORD_ENCRYPTION_KEY",
@@ -221,6 +210,7 @@ jobs:
             else "excel"
         )
 
+        file_path = None
         if source_type == "excel":
             stage = "upload_excel_to_drive"
             file_path = upload_to_drive(
@@ -260,8 +250,7 @@ jobs:
                 "student_name": r["student_name"],
                 "login_identifier": r["login_identifier"],
                 "encrypted_password": encrypt_password(
-                    r["password"],
-                    encryption_key
+                    r["password"], encryption_key
                 ),
                 "application_status": "",
                 "original_data": r["original_data"],
@@ -318,7 +307,6 @@ jobs:
                 "حاولي مرة تانية."
             )
 '''
-
           new_except = '''        except Exception as exc:
 
             import traceback
@@ -336,24 +324,22 @@ jobs:
                 f"السبب: {type(exc).__name__}: {exc}"
             )
 '''
-
           if old_except not in s:
               raise SystemExit("job preparation exception block not found")
           s = s.replace(old_except, new_except, 1)
 
           compile(s, "streamlit_app (7).py", "exec")
           p.write_text(s, encoding="utf-8")
-          print("Excel preparation patch compiled successfully")
           PY
 
       - name: Verify
         run: python -m py_compile "streamlit_app (7).py"
 
-      - name: Commit patch and remove workflow
+      - name: Commit patch and remove repair files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "streamlit_app (7).py"
-          git rm -f .github/workflows/repair-excel-prep.yml
+          git rm -f .github/workflows/repair-excel-prep.yml .github/excel_prep_fix_trigger.txt
           git commit -m "Fix Excel job preparation diagnostics"
           git push origin main
