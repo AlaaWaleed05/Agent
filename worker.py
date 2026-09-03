@@ -1515,6 +1515,9 @@ def update_excel_student_status(source_ref, student, status):
         raise RuntimeError("excel_source_missing")
 
     file_bytes = download_drive_file_bytes(source_ref)
+    if not file_bytes:
+        raise RuntimeError("excel_download_empty")
+
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
     ws = wb.active
     cols, header_row = find_excel_columns_for_output(ws)
@@ -1529,10 +1532,15 @@ def update_excel_student_status(source_ref, student, status):
         if header_row < candidate <= ws.max_row:
             target_row = candidate
 
+    if target_row is not None and login:
+        row_login = _excel_text(ws.cell(target_row, cols["email"] + 1).value).casefold()
+        if row_login != login:
+            target_row = None
+
     if target_row is None and login:
         for row_idx in range(header_row + 1, ws.max_row + 1):
-            email = _excel_text(ws.cell(row_idx, cols["email"] + 1).value).casefold()
-            if email == login:
+            row_login = _excel_text(ws.cell(row_idx, cols["email"] + 1).value).casefold()
+            if row_login == login:
                 target_row = row_idx
                 break
 
@@ -1554,6 +1562,7 @@ def update_excel_student_status(source_ref, student, status):
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         resumable=False,
     )
+
     result = service.files().update(
         fileId=source_ref,
         media_body=media,

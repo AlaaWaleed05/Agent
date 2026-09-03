@@ -1379,7 +1379,6 @@ def update_excel_student_status(source_ref, student, status):
     cols, header_row = _find_excel_layout(ws)
     email_col = cols["email"]
 
-    # Find/create the status column without changing any other columns.
     status_col = cols.get("status")
     if status_col is None:
         status_col = ws.max_column + 1
@@ -1389,13 +1388,11 @@ def update_excel_student_status(source_ref, student, status):
     source_row = student.get("source_row_number")
     target_row = None
 
-    # The stored source row belongs to this exact uploaded workbook.
     if source_row:
         candidate = int(source_row)
         if header_row < candidate <= ws.max_row:
             target_row = candidate
 
-    # Verify the row against the student's email; otherwise fall back to email search.
     if target_row is not None and login:
         row_login = _excel_text(ws.cell(target_row, email_col).value).casefold()
         if row_login != login:
@@ -1442,113 +1439,6 @@ def update_excel_student_status(source_ref, student, status):
     )
 
 # =========================================================
-
-def update_excel_student_status(
-    source_ref,
-    student,
-    status
-):
-
-    if not source_ref:
-        raise RuntimeError(
-            "excel_source_missing"
-        )
-
-    file_bytes = download_drive_file_bytes(
-        source_ref
-    )
-
-    wb = openpyxl.load_workbook(
-        io.BytesIO(file_bytes),
-        data_only=False
-    )
-
-    ws = wb.active
-
-    cols, header_row = find_excel_columns(
-        ws
-    )
-
-    status_col = (
-        find_status_column_for_output(
-            ws,
-            header_row
-        )
-    )
-
-    source_row = student.get(
-        "source_row_number"
-    )
-
-    if not source_row:
-
-        login = str(
-            student.get(
-                "login_identifier"
-            ) or ""
-        ).strip().lower()
-
-        for row_idx in range(
-            header_row + 1,
-            ws.max_row + 1
-        ):
-
-            email = str(
-                ws.cell(
-                    row_idx,
-                    cols["email"] + 1
-                ).value or ""
-            ).strip().lower()
-
-            if email == login:
-
-                source_row = row_idx
-
-                break
-
-    if not source_row:
-        raise RuntimeError(
-            "excel_student_row_missing"
-        )
-
-    ws.cell(
-        int(source_row),
-        status_col
-    ).value = status
-
-    output = io.BytesIO()
-
-    wb.save(output)
-
-    updated_bytes = output.getvalue()
-
-    service = drive_service()
-
-    media = MediaIoBaseUpload(
-        io.BytesIO(updated_bytes),
-        mimetype=(
-            "application/vnd.openxmlformats-"
-            "officedocument.spreadsheetml.sheet"
-        ),
-        resumable=True,
-    )
-
-    (
-        service
-        .files()
-        .update(
-            fileId=str(source_ref),
-            media_body=media
-        )
-        .execute()
-    )
-
-    safe_log(
-        f"Live Excel update: "
-        f"{student.get('student_name')} "
-        f"-> {status}"
-    )
-
 
 # =========================================================
 # LIVE GOOGLE SHEET UPDATE
