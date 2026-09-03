@@ -333,7 +333,78 @@ def log_activity(
 # =========================================================
 # GOOGLE SHEETS
 # =========================================================
+def get_google_credentials(scopes):
 
+    if Credentials is None:
+        raise RuntimeError(
+            "Google credentials libraries unavailable"
+        )
+
+    creds_dict = st.secrets.get("gcp_service_account")
+
+    if creds_dict:
+        try:
+            creds_dict = dict(creds_dict)
+        except Exception:
+            pass
+
+        if (
+            hasattr(creds_dict, "get")
+            and creds_dict.get("client_email")
+            and creds_dict.get("private_key")
+        ):
+            return Credentials.from_service_account_info(
+                creds_dict,
+                scopes=scopes
+            )
+
+    raw = st.secrets.get(
+        "GCP_SERVICE_ACCOUNT_JSON",
+        os.getenv("GCP_SERVICE_ACCOUNT_JSON")
+    )
+
+    if raw:
+        data = (
+            json.loads(raw)
+            if isinstance(raw, str)
+            else dict(raw)
+        )
+
+        return Credentials.from_service_account_info(
+            data,
+            scopes=scopes
+        )
+
+    raw = st.secrets.get(
+        "GOOGLE_SERVICE_ACCOUNT_JSON",
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    )
+
+    if raw:
+        data = (
+            json.loads(raw)
+            if isinstance(raw, str)
+            else dict(raw)
+        )
+
+        return Credentials.from_service_account_info(
+            data,
+            scopes=scopes
+        )
+
+    credentials_file = os.getenv(
+        "GOOGLE_APPLICATION_CREDENTIALS"
+    )
+
+    if credentials_file:
+        return Credentials.from_service_account_file(
+            credentials_file,
+            scopes=scopes
+        )
+
+    raise RuntimeError(
+        "Google service account configuration missing"
+    )
 def get_gsheet_client():
 
     if gspread is None or Credentials is None:
@@ -341,13 +412,10 @@ def get_gsheet_client():
             "Google Sheets libraries unavailable"
         )
 
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=[
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive",
-        ],
-    )
+    creds = get_google_credentials([
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive",
+    ])
 
     return gspread.authorize(creds)
 
