@@ -72,6 +72,8 @@ DRIVE_FOLDER_ID = (
     or "12L_qSHBnW4-tfQZRteynInWNBAML016f"
 )
 
+EXCEL_BUCKET = "excel-files"
+
 
 # ============================================================
 # CONFIG
@@ -1512,44 +1514,73 @@ def safe_quit(driver):
 def update_excel_student_status(source_ref, student, status):
     source_ref = _excel_text(source_ref)
     if not source_ref:
-        raise RuntimeError('excel_source_missing')
-    file_bytes = download_drive_file_bytes(source_ref)
+        raise RuntimeError("excel_source_missing")
+
+    file_bytes = (
+        db.storage
+        .from_(EXCEL_BUCKET)
+        .download(source_ref)
+    )
     if not file_bytes:
-        raise RuntimeError('excel_download_empty')
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+        raise RuntimeError("excel_download_empty")
+
+    wb = openpyxl.load_workbook(
+        io.BytesIO(file_bytes),
+        data_only=False
+    )
     ws = wb.active
+
     cols, header_row = find_excel_columns_for_output(ws)
     status_col = find_status_column(ws, header_row)
-    login = _excel_text(student.get('login_identifier')).casefold()
-    source_row = student.get('source_row_number')
+
+    login = _excel_text(
+        student.get("login_identifier")
+    ).casefold()
+    source_row = student.get("source_row_number")
     target_row = None
+
     if source_row:
         candidate = int(source_row)
         if header_row < candidate <= ws.max_row:
-            target_row = candidate
-    if target_row is not None and login:
-        if _excel_text(ws.cell(target_row, cols['email'] + 1).value).casefold() != login:
-            target_row = None
+            candidate_login = _excel_text(
+                ws.cell(candidate, cols["email"] + 1).value
+            ).casefold()
+            if candidate_login == login:
+                target_row = candidate
+
     if target_row is None and login:
         for row_idx in range(header_row + 1, ws.max_row + 1):
-            if _excel_text(ws.cell(row_idx, cols['email'] + 1).value).casefold() == login:
+            row_login = _excel_text(
+                ws.cell(row_idx, cols["email"] + 1).value
+            ).casefold()
+            if row_login == login:
                 target_row = row_idx
                 break
+
     if target_row is None:
-        raise RuntimeError(f'excel_student_row_not_found:{login}')
-    ws.cell(target_row, status_col).value = _excel_text(status)
+        raise RuntimeError("excel_student_row_missing")
+
+    ws.cell(target_row, status_col).value = str(status or "")
+
     output = io.BytesIO()
     wb.save(output)
-    output.seek(0)
     updated_bytes = output.getvalue()
     if not updated_bytes:
-        raise RuntimeError('excel_output_empty')
-    service = drive_service()
-    media = MediaIoBaseUpload(io.BytesIO(updated_bytes), mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', resumable=False)
-    result = service.files().update(fileId=source_ref, media_body=media, supportsAllDrives=True, fields='id,modifiedTime,size,mimeType,name').execute()
-    if str(result.get('id') or '').strip() != source_ref:
-        raise RuntimeError('excel_drive_update_wrong_file')
-    print(f'[EXCEL] SUCCESS file={source_ref} row={target_row} status={status}')
+        raise RuntimeError("excel_updated_file_empty")
+
+    db.storage.from_(EXCEL_BUCKET).upload(
+        source_ref,
+        updated_bytes,
+        {
+            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "upsert": "true",
+        },
+    )
+
+    print(
+        f"    ✓ Excel live update: {student.get('student_name') or login}"
+    )
+
 
 # ============================================================
 # LIVE GOOGLE SHEET UPDATE
@@ -2110,7 +2141,7 @@ def process_job(job):
             # The current student's result is already saved.
             # ====================================================
 
-            if needs_browser_restart:
+            if False and needs_browser_restart:
 
                 print(
                     f"🔄 Restarting Chrome "
@@ -2559,7 +2590,7 @@ def process_job(job):
                 # This is AFTER DB + source + progress.
                 # =================================================
 
-                if needs_browser_restart:
+                if False and needs_browser_restart:
 
                     print(
                         f"🔄 Restarting Chrome "
