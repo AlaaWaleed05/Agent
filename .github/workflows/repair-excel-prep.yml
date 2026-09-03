@@ -21,325 +21,194 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Patch Excel job preparation
+      - name: Patch Excel only
+        shell: python
         run: |
-          python - <<'PY'
           from pathlib import Path
-          p = Path("streamlit_app (7).py")
-          s = p.read_text(encoding="utf-8")
 
-          old_import = '''def import_students(
-    office_id,
-    source_type,
-    source_name,
-    file_bytes=None,
-    source_url=None
-):
+          APP = Path("streamlit_app (7).py")
+          WORKER = Path("worker.py")
 
-    if source_type in {
-        "xlsx",
-        "xls",
-        "excel"
-    }:
+          def replace_block(text, start, end, replacement):
+              a = text.find(start)
+              if a < 0:
+                  raise RuntimeError(f"start marker not found: {start}")
+              b = text.find(end, a + len(start))
+              if b < 0:
+                  raise RuntimeError(f"end marker not found: {end}")
+              return text[:a] + replacement.rstrip() + "\n\n" + text[b:]
 
-        records = parse_excel_bytes(
-            file_bytes
-        )
+          app_text = APP.read_text(encoding="utf-8")
+          app_start = "# =========================================================\n# LIVE EXCEL UPDATE\n# SAME DRIVE FILE\n# ========================================================="
+          app_end = "# =========================================================\n# LIVE GOOGLE SHEET UPDATE\n# SAME SHEET\n# ========================================================="
+          app_live = r'''# =========================================================
+          # LIVE EXCEL UPDATE
+          # SAME DRIVE FILE
+          # =========================================================
 
-    else:
+          def update_excel_student_status(source_ref, student, status):
+              source_ref = _excel_text(source_ref)
+              if not source_ref:
+                  raise RuntimeError("excel_source_missing")
 
-        rows = read_gsheet_rows(
-            source_url
-        )
+              file_bytes = download_drive_file_bytes(source_ref)
+              if not file_bytes:
+                  raise RuntimeError("excel_download_empty")
 
-        if not rows:
-            raise ValueError(
-                "الشيت فاضي."
-            )
+              wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+              ws = wb.active
+              cols, header_row = _find_excel_layout(ws)
+              email_col = cols["email"]
 
-        wb = openpyxl.Workbook()
+              status_col = cols.get("status")
+              if status_col is None:
+                  status_col = ws.max_column + 1
+                  ws.cell(header_row, status_col).value = "حالة الطلب"
 
-        ws = wb.active
+              login = _excel_text(student.get("login_identifier")).casefold()
+              source_row = student.get("source_row_number")
+              target_row = None
 
-        for row in rows:
-            ws.append(row)
+              if source_row:
+                  candidate = int(source_row)
+                  if header_row < candidate <= ws.max_row:
+                      target_row = candidate
 
-        out = io.BytesIO()
+              if target_row is not None and login:
+                  row_login = _excel_text(ws.cell(target_row, email_col).value).casefold()
+                  if row_login != login:
+                      target_row = None
 
-        wb.save(out)
+              if target_row is None and login:
+                  for row_idx in range(header_row + 1, ws.max_row + 1):
+                      row_login = _excel_text(ws.cell(row_idx, email_col).value).casefold()
+                      if row_login == login:
+                          target_row = row_idx
+                          break
 
-        records = parse_excel_bytes(
-            out.getvalue()
-        )
+              if target_row is None:
+                  raise RuntimeError(f"excel_student_row_not_found:{login}")
 
-    if not records:
-        raise ValueError(
-            "مش لاقي طلاب عندهم إيميل وباسورد صالحين."
-        )
+              ws.cell(target_row, status_col).value = _excel_text(status)
 
-    encryption_key = st.secrets.get(
-        "STUDENT_PASSWORD_ENCRYPTION_KEY",
-        os.getenv(
-            "STUDENT_PASSWORD_ENCRYPTION_KEY"
-        )
-    )
+              output = io.BytesIO()
+              wb.save(output)
+              output.seek(0)
+              updated_bytes = output.getvalue()
+              if not updated_bytes:
+                  raise RuntimeError("excel_output_empty")
 
-    source_type = (
-        "google_sheet"
-        if source_type in {
-            "gsheet",
-            "google_sheet"
-        }
-        else "excel"
-    )
+              service = drive_service()
+              media = MediaIoBaseUpload(
+                  io.BytesIO(updated_bytes),
+                  mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                  resumable=False,
+              )
 
-    file_path = None
+              result = service.files().update(
+                  fileId=source_ref,
+                  media_body=media,
+                  supportsAllDrives=True,
+                  fields="id,modifiedTime,size,mimeType,name",
+              ).execute()
 
-    if source_type == "excel":
+              if str(result.get("id") or "").strip() != source_ref:
+                  raise RuntimeError("excel_drive_update_wrong_file")
 
-        if not file_bytes:
-            raise ValueError(
-                "ملف Excel غير موجود."
-            )
+              safe_log(
+                  f"Live Excel update: {student.get('student_name')} -> {status}"
+              )
 
-        file_path = upload_to_drive(
-            file_bytes,
-            source_name,
-            ""
-        )
+          # ========================================================='''
+          app_text = replace_block(app_text, app_start, app_end, app_live)
+          APP.write_text(app_text, encoding="utf-8")
 
-    source = (
-        db()
-        .table("data_sources")
-        .insert({
-            "office_id": office_id,
-            "source_type": source_type,
-            "source_name": source_name,
-            "source_url": source_url,
-            "file_path": file_path,
-            "column_mapping": {},
-        })
-        .execute()
-        .data[0]
-    )
+          worker_text = WORKER.read_text(encoding="utf-8")
+          worker_start = "# ============================================================\n# LIVE EXCEL UPDATE\n# ============================================================"
+          worker_end = "# ============================================================\n# LIVE GOOGLE SHEET UPDATE\n# ============================================================"
+          worker_live = r'''# ============================================================
+          # LIVE EXCEL UPDATE
+          # ============================================================
 
-    payload = [
-        {
-            "office_id": office_id,
-            "data_source_id": source["id"],
-            "source_row_number": r[
-                "source_row_number"
-            ],
-            "student_name": r[
-                "student_name"
-            ],
-            "login_identifier": r[
-                "login_identifier"
-            ],
-            "encrypted_password":
-                encrypt_password(
-                    r["password"],
-                    encryption_key
-                ),
-            "application_status": "",
-            "original_data": r[
-                "original_data"
-            ],
-            "updated_at": now_iso(),
-        }
-        for r in records
-    ]
+          def update_excel_student_status(source_ref, student, status):
+              source_ref = _excel_text(source_ref)
+              if not source_ref:
+                  raise RuntimeError("excel_source_missing")
 
-    (
-        db()
-        .table("student_records")
-        .insert(payload)
-        .execute()
-    )
+              file_bytes = download_drive_file_bytes(source_ref)
+              if not file_bytes:
+                  raise RuntimeError("excel_download_empty")
 
-    return source, len(payload)
-'''
+              wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+              ws = wb.active
+              cols, header_row = find_excel_columns_for_output(ws)
+              status_col = find_status_column(ws, header_row)
 
-          new_import = '''def import_students(
-    office_id,
-    source_type,
-    source_name,
-    file_bytes=None,
-    source_url=None
-):
-    """Import valid students and create their persistent source records."""
-    stage = "start"
-    try:
-        if source_type in {"xlsx", "xls", "excel"}:
-            stage = "parse_excel"
-            if not file_bytes:
-                raise ValueError("ملف Excel غير موجود.")
-            records = parse_excel_bytes(file_bytes)
-        else:
-            stage = "read_google_sheet"
-            rows = read_gsheet_rows(source_url)
-            if not rows:
-                raise ValueError("الشيت فاضي.")
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            for row in rows:
-                ws.append(row)
-            out = io.BytesIO()
-            wb.save(out)
-            stage = "parse_google_sheet_rows"
-            records = parse_excel_bytes(out.getvalue())
+              login = _excel_text(student.get("login_identifier")).casefold()
+              source_row = student.get("source_row_number")
+              target_row = None
 
-        safe_log(
-            f"import_students stage={stage} office={office_id} "
-            f"valid_students={len(records)} source={source_name}"
-        )
+              if source_row:
+                  candidate = int(source_row)
+                  if header_row < candidate <= ws.max_row:
+                      target_row = candidate
 
-        if not records:
-            raise ValueError("مش لاقي طلاب عندهم إيميل وباسورد صالحين.")
+              if target_row is not None and login:
+                  row_login = _excel_text(ws.cell(target_row, cols["email"] + 1).value).casefold()
+                  if row_login != login:
+                      target_row = None
 
-        encryption_key = st.secrets.get(
-            "STUDENT_PASSWORD_ENCRYPTION_KEY",
-            os.getenv("STUDENT_PASSWORD_ENCRYPTION_KEY", "")
-        )
-        if not encryption_key:
-            raise RuntimeError("student_password_encryption_key_missing")
+              if target_row is None and login:
+                  for row_idx in range(header_row + 1, ws.max_row + 1):
+                      row_login = _excel_text(ws.cell(row_idx, cols["email"] + 1).value).casefold()
+                      if row_login == login:
+                          target_row = row_idx
+                          break
 
-        source_type = (
-            "google_sheet"
-            if source_type in {"gsheet", "google_sheet"}
-            else "excel"
-        )
+              if target_row is None:
+                  raise RuntimeError(f"excel_student_row_not_found:{login}")
 
-        file_path = None
-        if source_type == "excel":
-            stage = "upload_excel_to_drive"
-            file_path = upload_to_drive(
-                file_bytes,
-                source_name or "students.xlsx",
-                ""
-            )
-            if not file_path:
-                raise RuntimeError("excel_drive_upload_returned_empty_id")
+              ws.cell(target_row, status_col).value = _excel_text(status)
 
-        stage = "create_data_source"
-        response = (
-            db()
-            .table("data_sources")
-            .insert({
-                "office_id": office_id,
-                "source_type": source_type,
-                "source_name": source_name,
-                "source_url": source_url,
-                "file_path": file_path,
-                "column_mapping": {},
-            })
-            .execute()
-        )
-        source_rows = response.data or []
-        if not source_rows:
-            raise RuntimeError("data_source_insert_returned_empty")
-        source = source_rows[0]
+              output = io.BytesIO()
+              wb.save(output)
+              output.seek(0)
+              updated_bytes = output.getvalue()
+              if not updated_bytes:
+                  raise RuntimeError("excel_output_empty")
 
-        stage = "encrypt_student_passwords"
-        payload = []
-        for r in records:
-            payload.append({
-                "office_id": office_id,
-                "data_source_id": source["id"],
-                "source_row_number": r["source_row_number"],
-                "student_name": r["student_name"],
-                "login_identifier": r["login_identifier"],
-                "encrypted_password": encrypt_password(
-                    r["password"], encryption_key
-                ),
-                "application_status": "",
-                "original_data": r["original_data"],
-                "updated_at": now_iso(),
-            })
+              service = drive_service()
+              media = MediaIoBaseUpload(
+                  io.BytesIO(updated_bytes),
+                  mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                  resumable=False,
+              )
 
-        stage = "insert_student_records"
-        student_response = (
-            db()
-            .table("student_records")
-            .insert(payload)
-            .execute()
-        )
-        inserted = student_response.data or []
-        if len(inserted) != len(payload):
-            raise RuntimeError(
-                f"student_records_insert_count_mismatch:{len(inserted)}/{len(payload)}"
-            )
+              result = service.files().update(
+                  fileId=source_ref,
+                  media_body=media,
+                  supportsAllDrives=True,
+                  fields="id,modifiedTime,size,mimeType,name",
+              ).execute()
 
-        safe_log(
-            f"import_students SUCCESS office={office_id} "
-            f"source_id={source['id']} students={len(payload)} "
-            f"drive_file={file_path or '-'}"
-        )
-        return source, len(payload)
+              if str(result.get("id") or "").strip() != source_ref:
+                  raise RuntimeError("excel_drive_update_wrong_file")
 
-    except Exception as exc:
-        safe_log(
-            f"import_students FAILED stage={stage} office={office_id} "
-            f"source={source_name}: {type(exc).__name__}: {exc}"
-        )
-        import traceback
-        traceback.print_exc()
-        raise
-'''
+              print(f"[EXCEL] SUCCESS file={source_ref} row={target_row} status={status}")
 
-          if old_import not in s:
-              raise SystemExit("import_students block not found")
-          s = s.replace(old_import, new_import, 1)
+          # ============================================================'''
+          worker_text = replace_block(worker_text, worker_start, worker_end, worker_live)
+          WORKER.write_text(worker_text, encoding="utf-8")
 
-          old_except = '''        except Exception as exc:
+      - name: Validate syntax
+        run: |
+          python -m py_compile "streamlit_app (7).py" worker.py
 
-            safe_log(
-                f"job preparation failed: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
-            st.session_state.update_start_requested = False
-
-            st.session_state.update_locked = False
-
-            st.error(
-                "تعذر تجهيز التحديث حاليًا. "
-                "حاولي مرة تانية."
-            )
-'''
-          new_except = '''        except Exception as exc:
-
-            import traceback
-            safe_log(
-                f"job preparation failed: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            traceback.print_exc()
-
-            st.session_state.update_start_requested = False
-            st.session_state.update_locked = False
-
-            st.error(
-                "تعذر تجهيز التحديث حاليًا. "
-                f"السبب: {type(exc).__name__}: {exc}"
-            )
-'''
-          if old_except not in s:
-              raise SystemExit("job preparation exception block not found")
-          s = s.replace(old_except, new_except, 1)
-
-          compile(s, "streamlit_app (7).py", "exec")
-          p.write_text(s, encoding="utf-8")
-          PY
-
-      - name: Verify
-        run: python -m py_compile "streamlit_app (7).py"
-
-      - name: Commit patch and remove repair files
+      - name: Commit and clean temporary repair files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "streamlit_app (7).py"
+          git add "streamlit_app (7).py" worker.py
           git rm -f .github/workflows/repair-excel-prep.yml .github/excel_prep_fix_trigger.txt
-          git commit -m "Fix Excel job preparation diagnostics"
+          git commit -m "Fix Excel live status updates [skip ci]"
           git push origin main
