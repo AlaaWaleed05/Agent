@@ -516,6 +516,61 @@ def download_drive_file_bytes(file_id):
 # Other Excel columns are preserved and ignored by the importer.
 # =========================================================
 
+def get_saved_gsheet_link(office_id):
+
+    try:
+
+        rows = (
+            db()
+            .table("data_sources")
+            .select("source_url,created_at")
+            .eq("office_id", office_id)
+            .eq("source_type", "google_sheet")
+            .not_.is_("source_url", "null")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+
+        return (
+            rows[0].get("source_url")
+            if rows
+            else None
+        )
+
+    except Exception:
+        return None
+
+
+def save_gsheet_link(office_id, link):
+
+    try:
+
+        if not extract_sheet_id(link):
+            return False, "الرابط غير صحيح!"
+
+        (
+            db()
+            .table("data_sources")
+            .insert({
+                "office_id": office_id,
+                "source_type": "google_sheet",
+                "source_name": "Google Sheet",
+                "source_url": link,
+                "column_mapping": {},
+            })
+            .execute()
+        )
+
+        return True, "تم حفظ الرابط بنجاح"
+
+    except Exception:
+        safe_log("Google Sheet link save failed")
+        return False, "تعذر حفظ الرابط حاليًا."
+
+
 def _excel_text(value):
     return "" if value is None else str(value).strip()
 
