@@ -333,6 +333,358 @@ def log_activity(
 # =========================================================
 # GOOGLE SHEETS
 # =========================================================
+
+def get_gsheet_client():
+
+    if gspread is None or Credentials is None:
+        raise RuntimeError(
+            "Google Sheets libraries unavailable"
+        )
+
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=[
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+
+    return gspread.authorize(creds)
+
+
+def extract_sheet_id(link):
+
+    match = re.search(
+        r"/spreadsheets/d/([a-zA-Z0-9-_]+)",
+        str(link)
+    )
+
+    return match.group(1) if match else None
+
+
+def extract_gid(link):
+
+    match = re.search(
+        r"[?#&]gid=(\d+)",
+        str(link)
+    )
+
+    return int(match.group(1)) if match else None
+
+
+def read_gsheet_rows(link):
+
+    sheet_id = extract_sheet_id(link)
+
+    if not sheet_id:
+        raise ValueError(
+            "رابط Google Sheets غير صحيح."
+        )
+
+    spreadsheet = (
+        get_gsheet_client()
+        .open_by_key(sheet_id)
+    )
+
+    gid = extract_gid(link)
+
+    worksheet = (
+        next(
+            (
+                w
+                for w in spreadsheet.worksheets()
+                if w.id == gid
+            ),
+            spreadsheet.sheet1
+        )
+        if gid is not None
+        else spreadsheet.sheet1
+    )
+
+    return worksheet.get_all_values()
+
+
+def get_saved_gsheet_link(office_id):
+
+    try:
+
+        rows = (
+            db()
+            .table("data_sources")
+            .select(
+                "source_url,created_at"
+            )
+            .eq(
+                "office_id",
+                office_id
+            )
+            .eq(
+                "source_type",
+                "google_sheet"
+            )
+            .not_.is_(
+                "source_url",
+                "null"
+            )
+            .order(
+                "created_at",
+                desc=True
+            )
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+
+        return (
+            rows[0].get("source_url")
+            if rows
+            else None
+        )
+
+    except Exception:
+        return None
+
+
+def save_gsheet_link(office_id, link):
+
+    try:
+
+        if not extract_sheet_id(link):
+            return False, "الرابط غير صحيح!"
+
+        (
+            db()
+            .table("data_sources")
+            .insert({
+                "office_id": office_id,
+                "source_type": "google_sheet",
+                "source_name": "Google Sheet",
+                "source_url": link,
+                "column_mapping": {},
+            })
+            .execute()
+        )
+
+        return (
+            True,
+            "تم حفظ الرابط بنجاح"
+        )
+
+    except Exception:
+
+        safe_log(
+            "Google Sheet link save failed"
+        )
+
+        return (
+            False,
+            "تعذر حفظ الرابط حاليًا."
+        )
+
+
+# =========================================================
+# EXCEL
+# =========================================================
+
+def find_excel_columns(ws):
+
+    cols = {
+        "name": None,
+        "email": None,
+        "password": None
+    }
+
+    header_row = None
+
+    for row_idx, row in enumerate(
+        ws.iter_rows(
+            min_row=1,
+            max_row=min(10, ws.max_row),
+            values_only=True
+        ),
+        start=1
+    ):
+
+        values = [
+            str(c).strip()
+            if c is not None
+            else ""
+            for c in row
+        ]
+
+        if any(
+            "يميل" in v
+            or "mail" in v.lower()
+            or "بريد" in v
+            for v in values
+        ):
+
+            header_row = row_idx
+
+            for i, cell in enumerate(values):
+
+                low = cell.lower()
+
+                if (
+                    any(
+                        k in cell
+                        for k in [
+                            "اسم",
+                            "الإسم",
+                            "الاسم"
+                        ]
+                    )
+                    or "name" in low
+                ):
+
+                    cols["name"] = i
+
+                elif (
+                    any(
+                        k in cell
+                        for k in [
+                            "يميل",
+                            "بريد"
+                        ]
+                    )
+                    or "mail" in low
+                ):
+
+                    cols["email"] = i
+
+                elif any(
+                    k in cell
+                    for k in [
+                        "باسورد",
+                        "كلمة المرور",
+                        "password",
+                        "pass"
+                    ]
+                ):
+
+                    cols["password"] = i
+
+            break
+
+    if header_row is None:
+        raise ValueError(
+            "مش لاقي هيدر الإكسيل."
+        )
+
+    if cols["email"] is None:
+        raise ValueError(
+            "مش لاقي عمود الإيميل."
+        )
+
+    if cols["password"] is None:
+        raise ValueError(
+            "مش لاقي عمود الباسورد."
+        )
+
+    if cols["name"] is None:
+        cols["name"] = cols["email"]
+
+    return cols, header_row
+
+
+def parse_excel_bytes(file_bytes):
+
+    wb = openpyxl.load_workbook(
+        io.BytesIO(file_bytes),
+        data_only=False
+    )
+
+    ws = wb.active
+
+    cols, header_row = find_excel_columns(ws)
+
+    records = []
+
+    seen = set()
+
+    for excel_row, row in enumerate(
+        ws.iter_rows(
+            min_row=header_row + 1,
+            values_only=True
+        ),
+        start=header_row + 1
+    ):
+
+        values = list(row)
+
+        email = (
+            str(
+                values[cols["email"]] or ""
+            ).strip()
+            if cols["email"] < len(values)
+            else ""
+        )
+
+        password = (
+            str(
+                values[cols["password"]] or ""
+            ).strip()
+            if cols["password"] < len(values)
+            else ""
+        )
+
+        name = (
+            str(
+                values[cols["name"]] or ""
+            ).strip()
+            if cols["name"] < len(values)
+            else email
+        )
+
+        key = email.lower()
+
+        if (
+            not email
+            or not password
+            or key in seen
+        ):
+            continue
+
+        seen.add(key)
+
+        records.append({
+            "source_row_number": excel_row,
+            "student_name": name or email,
+            "login_identifier": email,
+            "password": password,
+            "original_data": {
+                f"column_{i+1}":
+                    (
+                        str(v)
+                        if v is not None
+                        else ""
+                    )
+                for i, v in enumerate(values)
+            },
+        })
+
+    return records
+
+
+def encrypt_password(password, key):
+
+    if not key:
+        raise RuntimeError(
+            "Encryption key missing"
+        )
+
+    return (
+        Fernet(key.encode())
+        .encrypt(password.encode())
+        .decode()
+    )
+
+
+# =========================================================
+# GOOGLE DRIVE
+# =========================================================
+
 def get_google_credentials(scopes):
 
     if Credentials is None:
@@ -340,66 +692,19 @@ def get_google_credentials(scopes):
             "Google credentials libraries unavailable"
         )
 
-    # Prefer direct Streamlit secret variables when they are available.
-    # This keeps GCP credentials independent from the nested TOML section.
-    direct = {
-        "type": "service_account",
-        "project_id": st.secrets.get(
-            "GCP_PROJECT_ID",
-            os.getenv("GCP_PROJECT_ID")
-        ),
-        "private_key_id": st.secrets.get(
-            "GCP_PRIVATE_KEY_ID",
-            os.getenv("GCP_PRIVATE_KEY_ID")
-        ),
-        "private_key": st.secrets.get(
-            "GCP_PRIVATE_KEY",
-            os.getenv("GCP_PRIVATE_KEY")
-        ),
-        "client_email": st.secrets.get(
-            "GCP_CLIENT_EMAIL",
-            os.getenv("GCP_CLIENT_EMAIL")
-        ),
-        "client_id": st.secrets.get(
-            "GCP_CLIENT_ID",
-            os.getenv("GCP_CLIENT_ID")
-        ),
-        "auth_uri": st.secrets.get(
-            "GCP_AUTH_URI",
-            os.getenv("GCP_AUTH_URI", "https://accounts.google.com/o/oauth2/auth")
-        ),
-        "token_uri": st.secrets.get(
-            "GCP_TOKEN_URI",
-            os.getenv("GCP_TOKEN_URI", "https://oauth2.googleapis.com/token")
-        ),
-    }
+    creds_dict = st.secrets.get(
+        "gcp_service_account"
+    )
 
-    if direct.get("client_email") and direct.get("private_key"):
-        if isinstance(direct["private_key"], str):
-            direct["private_key"] = direct["private_key"].replace("\\n", "\n")
-        return Credentials.from_service_account_info(
-            direct,
-            scopes=scopes
-        )
+    if isinstance(creds_dict, dict):
 
-    # Keep the existing nested secret as a fallback so Google Sheets keeps working.
-    creds_dict = st.secrets.get("gcp_service_account")
-
-    if creds_dict:
-        try:
-            creds_dict = dict(creds_dict)
-        except Exception:
-            pass
-
-        if (
-            hasattr(creds_dict, "get")
-            and creds_dict.get("client_email")
-            and creds_dict.get("private_key")
-        ):
-            return Credentials.from_service_account_info(
+        return (
+            Credentials
+            .from_service_account_info(
                 creds_dict,
                 scopes=scopes
             )
+        )
 
     raw = st.secrets.get(
         "GCP_SERVICE_ACCOUNT_JSON",
@@ -407,19 +712,19 @@ def get_google_credentials(scopes):
     )
 
     if raw:
-        data = (
-            json.loads(raw)
-            if isinstance(raw, str)
-            else dict(raw)
-        )
-        return Credentials.from_service_account_info(
-            data,
-            scopes=scopes
+
+        return (
+            Credentials
+            .from_service_account_info(
+                json.loads(raw),
+                scopes=scopes
+            )
         )
 
     raise RuntimeError(
         "Google service account configuration missing"
     )
+
 
 def drive_service():
 
@@ -460,23 +765,16 @@ def upload_to_drive(
         resumable=True,
     )
 
-    result = (
+    return (
         service
         .files()
         .create(
             body=metadata,
             media_body=media,
-            supportsAllDrives=True,
             fields="id"
         )
-        .execute()
+        .execute()["id"]
     )
-
-    file_id = str(result.get("id") or "").strip()
-    if not file_id:
-        raise RuntimeError("excel_drive_upload_missing_id")
-
-    return file_id
 
 
 def download_drive_file_bytes(file_id):
@@ -993,11 +1291,6 @@ def import_students(
             ""
         )
 
-        if not str(file_path or "").strip():
-            raise RuntimeError(
-                "excel_drive_upload_missing_id"
-            )
-
     source = (
         db()
         .table("data_sources")
@@ -1055,51 +1348,112 @@ def import_students(
 # SAME DRIVE FILE
 # =========================================================
 
-def update_excel_student_status(source_ref, student, status):
-    source_ref = _excel_text(source_ref)
+def update_excel_student_status(
+    source_ref,
+    student,
+    status
+):
+
     if not source_ref:
-        raise RuntimeError('excel_source_missing')
-    file_bytes = download_drive_file_bytes(source_ref)
-    if not file_bytes:
-        raise RuntimeError('excel_download_empty')
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+        raise RuntimeError(
+            "excel_source_missing"
+        )
+
+    file_bytes = download_drive_file_bytes(
+        source_ref
+    )
+
+    wb = openpyxl.load_workbook(
+        io.BytesIO(file_bytes),
+        data_only=False
+    )
+
     ws = wb.active
-    cols, header_row = _find_excel_layout(ws)
-    email_col = cols['email']
-    status_col = cols.get('status')
-    if status_col is None:
-        status_col = ws.max_column + 1
-        ws.cell(header_row, status_col).value = 'حالة الطلب'
-    login = _excel_text(student.get('login_identifier')).casefold()
-    source_row = student.get('source_row_number')
-    target_row = None
-    if source_row:
-        candidate = int(source_row)
-        if header_row < candidate <= ws.max_row:
-            target_row = candidate
-    if target_row is not None and login:
-        if _excel_text(ws.cell(target_row, email_col).value).casefold() != login:
-            target_row = None
-    if target_row is None and login:
-        for row_idx in range(header_row + 1, ws.max_row + 1):
-            if _excel_text(ws.cell(row_idx, email_col).value).casefold() == login:
-                target_row = row_idx
+
+    cols, header_row = find_excel_columns(
+        ws
+    )
+
+    status_col = (
+        find_status_column_for_output(
+            ws,
+            header_row
+        )
+    )
+
+    source_row = student.get(
+        "source_row_number"
+    )
+
+    if not source_row:
+
+        login = str(
+            student.get(
+                "login_identifier"
+            ) or ""
+        ).strip().lower()
+
+        for row_idx in range(
+            header_row + 1,
+            ws.max_row + 1
+        ):
+
+            email = str(
+                ws.cell(
+                    row_idx,
+                    cols["email"] + 1
+                ).value or ""
+            ).strip().lower()
+
+            if email == login:
+
+                source_row = row_idx
+
                 break
-    if target_row is None:
-        raise RuntimeError(f'excel_student_row_not_found:{login}')
-    ws.cell(target_row, status_col).value = _excel_text(status)
+
+    if not source_row:
+        raise RuntimeError(
+            "excel_student_row_missing"
+        )
+
+    ws.cell(
+        int(source_row),
+        status_col
+    ).value = status
+
     output = io.BytesIO()
+
     wb.save(output)
-    output.seek(0)
+
     updated_bytes = output.getvalue()
-    if not updated_bytes:
-        raise RuntimeError('excel_output_empty')
+
     service = drive_service()
-    media = MediaIoBaseUpload(io.BytesIO(updated_bytes), mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', resumable=False)
-    result = service.files().update(fileId=source_ref, media_body=media, supportsAllDrives=True, fields='id,modifiedTime,size,mimeType,name').execute()
-    if str(result.get('id') or '').strip() != source_ref:
-        raise RuntimeError('excel_drive_update_wrong_file')
-    safe_log(f"Live Excel update: {student.get('student_name')} -> {status}")
+
+    media = MediaIoBaseUpload(
+        io.BytesIO(updated_bytes),
+        mimetype=(
+            "application/vnd.openxmlformats-"
+            "officedocument.spreadsheetml.sheet"
+        ),
+        resumable=True,
+    )
+
+    (
+        service
+        .files()
+        .update(
+            fileId=str(source_ref),
+            media_body=media
+        )
+        .execute()
+    )
+
+    safe_log(
+        f"Live Excel update: "
+        f"{student.get('student_name')} "
+        f"-> {status}"
+    )
+
 
 # =========================================================
 # LIVE GOOGLE SHEET UPDATE
@@ -1325,25 +1679,6 @@ def create_job(
     file_name
 ):
 
-    source_type = str(
-        source.get("source_type") or ""
-    ).strip().lower()
-
-    source_ref = (
-        str(source.get("file_path") or "").strip()
-        if source_type == "excel"
-        else str(
-            source.get("source_url")
-            or source.get("file_path")
-            or source["id"]
-        ).strip()
-    )
-
-    if source_type == "excel" and not source_ref:
-        raise RuntimeError(
-            "excel_source_missing"
-        )
-
     return (
         db()
         .table("jobs")
@@ -1351,7 +1686,10 @@ def create_job(
             "office_id": office_id,
             "data_source_id": source["id"],
             "source_type": source["source_type"],
-            "source_ref": source_ref,
+            "source_ref":
+                source.get("file_path")
+                or source.get("source_url")
+                or source["id"],
             "file_name": file_name,
             "status": "pending",
         })
@@ -3012,40 +3350,7 @@ def _background_update_job(
 
             time.sleep(2)
 
-        # IMPORTANT: the fallback is an emergency path only.
-        # Never compete with a real Selenium worker that is already
-        # processing another job. If any real worker-owned job is
-        # currently processing, leave this job pending so the worker
-        # can claim it when it becomes free.
-        try:
-            active_worker_jobs = (
-                db()
-                .table("jobs")
-                .select("id,claimed_by,status")
-                .eq("status", "processing")
-                .neq("claimed_by", "streamlit-fallback")
-                .limit(1)
-                .execute()
-                .data
-                or []
-            )
-        except Exception as worker_check_exc:
-            safe_log(
-                f"Could not verify active worker before fallback: "
-                f"{type(worker_check_exc).__name__}: {worker_check_exc}"
-            )
-            return
-
-        if active_worker_jobs:
-            safe_log(
-                f"Real worker is active; leaving job {job_id} pending "
-                f"for the worker queue."
-            )
-            return
-
-        # No worker-owned processing job is visible. Try to claim only
-        # if this job is still pending. This keeps the emergency fallback
-        # from racing a real worker for the same job.
+        # Try to claim only if the job is still pending.
         claimed = _claim_fallback_job(
             job_id
         )
