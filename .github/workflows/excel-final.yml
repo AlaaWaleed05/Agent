@@ -1,0 +1,30 @@
+name: Excel final patch
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/excel_final_trigger.txt'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply Excel patch
+        run: python .github/excel_patch_final.py
+      - name: Validate
+        run: |
+          python -m py_compile 'streamlit_app (7).py'
+          python -m py_compile worker.py
+      - name: Commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add 'streamlit_app (7).py' worker.py .github/workflows/apply-live-table.yml
+          git rm -f .github/excel_final_trigger.txt .github/excel_patch_final.py .github/excel_patch_once.py .github/workflows/excel-final.yml .github/workflows/fix_excel_live.yml .github/workflows/rebuild_excel_backend.yml .github/workflows/repair-excel-prep.yml 2>/dev/null || true
+          git diff --cached --quiet || git commit -m 'Fix Excel live status updates [skip ci]'
+          git push origin main
