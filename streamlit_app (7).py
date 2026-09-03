@@ -555,199 +555,143 @@ def save_gsheet_link(office_id, link):
 # EXCEL
 # =========================================================
 
+def _excel_text(value):
+    return "" if value is None else str(value).strip()
+
+def _excel_normalize_header(value):
+    value = _excel_text(value).lower()
+    return re.sub(r"[\s_\-]+", "", value)
+
+def _excel_header_kind(value):
+    low = _excel_normalize_header(value)
+    if ("email" in low or "mail" in low or
+            any(x in low for x in ("بريد", "ايميل", "إيميل", "يميل"))):
+        return "email"
+    if ("password" in low or "pass" in low or
+            any(x in low for x in ("باسورد", "كلمةالمرور", "كلمهالمرور", "كلمةالسر", "كلمهالسر"))):
+        return "password"
+    if "name" in low or "اسم" in low:
+        return "name"
+    if (low in {"حالةالطلب", "الحالة", "status"} or
+            ("حالة" in low and "اسم" not in low and "خدمة" not in low)):
+        return "status"
+    return None
+
+def _find_excel_layout(ws):
+    best = None
+    for row_idx in range(1, min(20, ws.max_row) + 1):
+        found = {}
+        for col_idx, cell in enumerate(ws[row_idx], start=1):
+            kind = _excel_header_kind(cell.value)
+            if kind and kind not in found:
+                found[kind] = col_idx
+        score = ((2 if "email" in found else 0) +
+                 (2 if "password" in found else 0) +
+                 (1 if "name" in found else 0) +
+                 (1 if "status" in found else 0))
+        if score >= 4 and "email" in found and "password" in found:
+            return found, row_idx
+        if best is None or score > best[0]:
+            best = (score, found, row_idx)
+    if best and "email" in best[1] and "password" in best[1]:
+        return best[1], best[2]
+    raise ValueError("ملف Excel لازم يحتوي على أعمدة الإيميل والباسورد.")
+
 def find_excel_columns(ws):
+    cols, header_row = _find_excel_layout(ws)
+    return {
+        "name": cols.get("name", cols["email"]) - 1,
+        "email": cols["email"] - 1,
+        "password": cols["password"] - 1,
+    }, header_row
 
-    cols = {
-        "name": None,
-        "email": None,
-        "password": None
-    }
-
-    header_row = None
-
-    for row_idx, row in enumerate(
-        ws.iter_rows(
-            min_row=1,
-            max_row=min(10, ws.max_row),
-            values_only=True
-        ),
-        start=1
-    ):
-
-        values = [
-            str(c).strip()
-            if c is not None
-            else ""
-            for c in row
-        ]
-
-        if any(
-            "يميل" in v
-            or "mail" in v.lower()
-            or "بريد" in v
-            for v in values
-        ):
-
-            header_row = row_idx
-
-            for i, cell in enumerate(values):
-
-                low = cell.lower()
-
-                if (
-                    any(
-                        k in cell
-                        for k in [
-                            "اسم",
-                            "الإسم",
-                            "الاسم"
-                        ]
-                    )
-                    or "name" in low
-                ):
-
-                    cols["name"] = i
-
-                elif (
-                    any(
-                        k in cell
-                        for k in [
-                            "يميل",
-                            "بريد"
-                        ]
-                    )
-                    or "mail" in low
-                ):
-
-                    cols["email"] = i
-
-                elif any(
-                    k in cell
-                    for k in [
-                        "باسورد",
-                        "كلمة المرور",
-                        "password",
-                        "pass"
-                    ]
-                ):
-
-                    cols["password"] = i
-
-            break
-
-    if header_row is None:
-        raise ValueError(
-            "مش لاقي هيدر الإكسيل."
-        )
-
-    if cols["email"] is None:
-        raise ValueError(
-            "مش لاقي عمود الإيميل."
-        )
-
-    if cols["password"] is None:
-        raise ValueError(
-            "مش لاقي عمود الباسورد."
-        )
-
-    if cols["name"] is None:
-        cols["name"] = cols["email"]
-
-    return cols, header_row
-
+def find_status_column_for_output(ws, header_row):
+    cols, _ = _find_excel_layout(ws)
+    if "status" in cols:
+        return cols["status"]
+    new_col = ws.max_column + 1
+    ws.cell(header_row, new_col).value = "حالة الطلب"
+    return new_col
 
 def parse_excel_bytes(file_bytes):
-
-    wb = openpyxl.load_workbook(
-        io.BytesIO(file_bytes),
-        data_only=False
-    )
+    if not file_bytes:
+        raise ValueError("ملف Excel غير موجود.")
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False, read_only=False)
+    except Exception as exc:
+        raise ValueError("تعذر قراءة ملف Excel. استخدمي ملف .xlsx صالح.") from exc
 
     ws = wb.active
-
     cols, header_row = find_excel_columns(ws)
-
     records = []
-
     seen = set()
 
     for excel_row, row in enumerate(
-        ws.iter_rows(
-            min_row=header_row + 1,
-            values_only=True
-        ),
-        start=header_row + 1
+        ws.iter_rows(min_row=header_row + 1, values_only=True),
+        start=header_row + 1,
     ):
-
         values = list(row)
 
-        email = (
-            str(
-                values[cols["email"]] or ""
-            ).strip()
-            if cols["email"] < len(values)
-            else ""
-        )
+        def cell_at(key):
+            idx = cols[key]
+            return _excel_text(values[idx]) if idx < len(values) else ""
 
-        password = (
-            str(
-                values[cols["password"]] or ""
-            ).strip()
-            if cols["password"] < len(values)
-            else ""
-        )
+        email = cell_at("email")
+        password = cell_at("password")
+        name = cell_at("name") or email
+        key = email.casefold()
 
-        name = (
-            str(
-                values[cols["name"]] or ""
-            ).strip()
-            if cols["name"] < len(values)
-            else email
-        )
-
-        key = email.lower()
-
-        if (
-            not email
-            or not password
-            or key in seen
-        ):
+        if not email or not password or key in seen:
             continue
 
         seen.add(key)
-
         records.append({
             "source_row_number": excel_row,
-            "student_name": name or email,
+            "student_name": name,
             "login_identifier": email,
             "password": password,
             "original_data": {
-                f"column_{i+1}":
-                    (
-                        str(v)
-                        if v is not None
-                        else ""
-                    )
-                for i, v in enumerate(values)
+                f"column_{i + 1}": _excel_text(value)
+                for i, value in enumerate(values)
             },
         })
 
+    if not records:
+        raise ValueError("مش لاقي طلاب عندهم إيميل وباسورد صالحين في ملف Excel.")
     return records
 
+def build_updated_excel(file_bytes, students):
+    if not file_bytes:
+        raise ValueError("ملف Excel غير موجود.")
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+    ws = wb.active
+    cols, header_row = find_excel_columns(ws)
+    status_col = find_status_column_for_output(ws, header_row)
+    by_login = {}
+    by_row = {}
 
-def encrypt_password(password, key):
+    for student in students:
+        login = _excel_text(student.get("login_identifier")).casefold()
+        status = _excel_text(student.get("application_status"))
+        if login and status:
+            by_login[login] = status
+        if student.get("source_row_number") and status:
+            by_row[int(student["source_row_number"])] = status
 
-    if not key:
-        raise RuntimeError(
-            "Encryption key missing"
-        )
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        email = _excel_text(ws.cell(row_idx, cols["email"] + 1).value).casefold()
+        status = by_login.get(email) or by_row.get(row_idx)
+        if status:
+            ws.cell(row_idx, status_col).value = status
 
-    return (
-        Fernet(key.encode())
-        .encrypt(password.encode())
-        .decode()
-    )
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
 
+# =========================================================
+# END EXCEL
+# =========================================================
 
 # =========================================================
 # GOOGLE DRIVE
@@ -1359,6 +1303,11 @@ def import_students(
             ""
         )
 
+        if not str(file_path or "").strip():
+            raise RuntimeError(
+                "excel_drive_upload_missing_id"
+            )
+
     source = (
         db()
         .table("data_sources")
@@ -1747,6 +1696,25 @@ def create_job(
     file_name
 ):
 
+    source_type = str(
+        source.get("source_type") or ""
+    ).strip().lower()
+
+    source_ref = (
+        str(source.get("file_path") or "").strip()
+        if source_type == "excel"
+        else str(
+            source.get("source_url")
+            or source.get("file_path")
+            or source["id"]
+        ).strip()
+    )
+
+    if source_type == "excel" and not source_ref:
+        raise RuntimeError(
+            "excel_source_missing"
+        )
+
     return (
         db()
         .table("jobs")
@@ -1754,10 +1722,7 @@ def create_job(
             "office_id": office_id,
             "data_source_id": source["id"],
             "source_type": source["source_type"],
-            "source_ref":
-                source.get("file_path")
-                or source.get("source_url")
-                or source["id"],
+            "source_ref": source_ref,
             "file_name": file_name,
             "status": "pending",
         })

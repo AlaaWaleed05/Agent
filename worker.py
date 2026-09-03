@@ -167,251 +167,129 @@ def drive_service():
 # GOOGLE DRIVE / EXCEL
 # ============================================================
 
-def download_drive_file_bytes(file_id):
-    service = drive_service()
+def _excel_text(value):
+    return "" if value is None else str(value).strip()
 
-    buffer = io.BytesIO()
+def _excel_normalize_header(value):
+    value = _excel_text(value).lower()
+    return re.sub(r"[\s_\-]+", "", value)
 
-    request = service.files().get_media(
-        fileId=str(file_id)
-    )
+def _excel_header_kind(value):
+    low = _excel_normalize_header(value)
+    if ("email" in low or "mail" in low or
+            any(x in low for x in ("بريد", "ايميل", "إيميل", "يميل"))):
+        return "email"
+    if ("password" in low or "pass" in low or
+            any(x in low for x in ("باسورد", "كلمةالمرور", "كلمهالمرور", "كلمةالسر", "كلمهالسر"))):
+        return "password"
+    if "name" in low or "اسم" in low:
+        return "name"
+    if (low in {"حالةالطلب", "الحالة", "status"} or
+            ("حالة" in low and "اسم" not in low and "خدمة" not in low)):
+        return "status"
+    return None
 
-    downloader = MediaIoBaseDownload(
-        buffer,
-        request
-    )
+def _find_excel_layout(ws):
+    best = None
+    for row_idx in range(1, min(20, ws.max_row) + 1):
+        found = {}
+        for col_idx, cell in enumerate(ws[row_idx], start=1):
+            kind = _excel_header_kind(cell.value)
+            if kind and kind not in found:
+                found[kind] = col_idx
+        score = ((2 if "email" in found else 0) +
+                 (2 if "password" in found else 0) +
+                 (1 if "name" in found else 0) +
+                 (1 if "status" in found else 0))
+        if score >= 4 and "email" in found and "password" in found:
+            return found, row_idx
+        if best is None or score > best[0]:
+            best = (score, found, row_idx)
+    if best and "email" in best[1] and "password" in best[1]:
+        return best[1], best[2]
+    raise RuntimeError("excel_columns_missing")
 
-    done = False
-
-    while not done:
-        _, done = downloader.next_chunk()
-
-    buffer.seek(0)
-
-    return buffer.getvalue()
-
-
-def upload_drive_file_bytes(file_bytes, filename):
-    service = drive_service()
-
-    metadata = {
-        "name": str(filename),
-        "parents": [DRIVE_FOLDER_ID],
-    }
-
-    media = MediaIoBaseUpload(
-        io.BytesIO(file_bytes),
-        mimetype=(
-            "application/vnd.openxmlformats-"
-            "officedocument.spreadsheetml.sheet"
-        ),
-        resumable=True,
-    )
-
-    return (
-        service.files()
-        .create(
-            body=metadata,
-            media_body=media,
-            fields="id",
-        )
-        .execute()["id"]
-    )
-
+def find_excel_columns_for_output(ws):
+    cols, header_row = _find_excel_layout(ws)
+    return {
+        "name": cols.get("name", cols["email"]) - 1,
+        "email": cols["email"] - 1,
+        "password": cols["password"] - 1,
+    }, header_row
 
 def find_status_column(ws, header_row):
-    for col_idx, cell in enumerate(
-        ws[header_row],
-        start=1
-    ):
-        value = str(
-            cell.value or ""
-        ).strip().lower()
-
-        if (
-            value in {"حالة الطلب", "الحالة"}
-            or (
-                "حالة" in value
-                and "اسم" not in value
-                and "خدمة" not in value
-            )
-        ):
-            return col_idx
-
+    cols, _ = _find_excel_layout(ws)
+    if "status" in cols:
+        return cols["status"]
     new_col = ws.max_column + 1
     ws.cell(header_row, new_col).value = "حالة الطلب"
     return new_col
 
+def download_drive_file_bytes(file_id):
+    file_id = _excel_text(file_id)
+    if not file_id:
+        raise RuntimeError("excel_source_missing")
+    service = drive_service()
+    buffer = io.BytesIO()
+    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    buffer.seek(0)
+    data = buffer.getvalue()
+    if not data:
+        raise RuntimeError("excel_download_empty")
+    return data
+
+def upload_drive_file_bytes(file_bytes, filename):
+    if not file_bytes:
+        raise RuntimeError("excel_upload_empty")
+    service = drive_service()
+    metadata = {"name": str(filename or "students.xlsx"), "parents": [DRIVE_FOLDER_ID]}
+    media = MediaIoBaseUpload(
+        io.BytesIO(file_bytes),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        resumable=False,
+    )
+    result = service.files().create(
+        body=metadata,
+        media_body=media,
+        supportsAllDrives=True,
+        fields="id",
+    ).execute()
+    file_id = str(result.get("id") or "").strip()
+    if not file_id:
+        raise RuntimeError("excel_drive_upload_missing_id")
+    return file_id
 
 def build_updated_excel(file_bytes, students):
-    wb = openpyxl.load_workbook(
-        io.BytesIO(file_bytes),
-        data_only=False
-    )
-
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
     ws = wb.active
-
     cols, header_row = find_excel_columns_for_output(ws)
-
-    status_col = find_status_column(
-        ws,
-        header_row
-    )
-
+    status_col = find_status_column(ws, header_row)
     by_login = {}
     by_row = {}
-
     for student in students:
-
-        login = str(
-            student.get("login_identifier")
-            or ""
-        ).strip().lower()
-
-        status = str(
-            student.get("application_status")
-            or ""
-        ).strip()
-
+        login = _excel_text(student.get("login_identifier")).casefold()
+        status = _excel_text(student.get("application_status"))
         if login and status:
             by_login[login] = status
-
-        if (
-            student.get("source_row_number")
-            and status
-        ):
-            by_row[
-                int(student["source_row_number"])
-            ] = status
-
-    email_col = cols.get("email")
-
-    for row_idx in range(
-        header_row + 1,
-        ws.max_row + 1
-    ):
-
-        status = None
-
-        if email_col is not None:
-
-            email = str(
-                ws.cell(
-                    row_idx,
-                    email_col + 1
-                ).value or ""
-            ).strip().lower()
-
-            status = by_login.get(email)
-
-        if status is None:
-            status = by_row.get(row_idx)
-
-        if status is not None:
-            ws.cell(
-                row_idx,
-                status_col
-            ).value = status
-
+        if student.get("source_row_number") and status:
+            by_row[int(student["source_row_number"])] = status
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        email = _excel_text(ws.cell(row_idx, cols["email"] + 1).value).casefold()
+        status = by_login.get(email) or by_row.get(row_idx)
+        if status:
+            ws.cell(row_idx, status_col).value = status
     output = io.BytesIO()
-
     wb.save(output)
-
     output.seek(0)
-
     return output.getvalue()
 
-
-def find_excel_columns_for_output(ws):
-    cols = {
-        "name": None,
-        "email": None,
-        "password": None,
-    }
-
-    header_row = None
-
-    for row_idx, row in enumerate(
-        ws.iter_rows(
-            min_row=1,
-            max_row=min(10, ws.max_row),
-            values_only=True
-        ),
-        start=1
-    ):
-
-        values = [
-            str(c).strip()
-            if c is not None
-            else ""
-            for c in row
-        ]
-
-        if any(
-            "يميل" in v
-            or "mail" in v.lower()
-            or "بريد" in v
-            for v in values
-        ):
-
-            header_row = row_idx
-
-            for i, cell in enumerate(values):
-
-                low = cell.lower()
-
-                if (
-                    any(
-                        k in cell
-                        for k in [
-                            "اسم",
-                            "الإسم",
-                            "الاسم"
-                        ]
-                    )
-                    or "name" in low
-                ):
-                    cols["name"] = i
-
-                elif (
-                    any(
-                        k in cell
-                        for k in [
-                            "يميل",
-                            "بريد"
-                        ]
-                    )
-                    or "mail" in low
-                ):
-                    cols["email"] = i
-
-                elif any(
-                    k in cell
-                    for k in [
-                        "باسورد",
-                        "كلمة المرور",
-                        "password",
-                        "pass"
-                    ]
-                ):
-                    cols["password"] = i
-
-            break
-
-    if (
-        header_row is None
-        or cols["email"] is None
-        or cols["password"] is None
-    ):
-        raise RuntimeError(
-            "excel_columns_missing"
-        )
-
-    if cols["name"] is None:
-        cols["name"] = cols["email"]
-
-    return cols, header_row
-
+# ============================================================
+# END GOOGLE DRIVE / EXCEL
+# ============================================================
 
 # ============================================================
 # GOOGLE SHEET - OLD BULK FUNCTION KEPT
@@ -1631,109 +1509,64 @@ def safe_quit(driver):
 # LIVE EXCEL UPDATE
 # ============================================================
 
-def update_excel_student_status(
-    source_ref,
-    student,
-    status
-):
-    source_ref = str(source_ref or "").strip()
+def update_excel_student_status(source_ref, student, status):
+    source_ref = _excel_text(source_ref)
     if not source_ref:
         raise RuntimeError("excel_source_missing")
 
-    student_name = str(
-        student.get("student_name")
-        or student.get("login_identifier")
-        or "طالب"
+    file_bytes = download_drive_file_bytes(source_ref)
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+    ws = wb.active
+    cols, header_row = find_excel_columns_for_output(ws)
+    status_col = find_status_column(ws, header_row)
+
+    login = _excel_text(student.get("login_identifier")).casefold()
+    source_row = student.get("source_row_number")
+    target_row = None
+
+    if source_row:
+        candidate = int(source_row)
+        if header_row < candidate <= ws.max_row:
+            target_row = candidate
+
+    if target_row is None and login:
+        for row_idx in range(header_row + 1, ws.max_row + 1):
+            email = _excel_text(ws.cell(row_idx, cols["email"] + 1).value).casefold()
+            if email == login:
+                target_row = row_idx
+                break
+
+    if target_row is None:
+        raise RuntimeError(f"excel_student_row_not_found:{login}")
+
+    ws.cell(target_row, status_col).value = _excel_text(status)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    updated_bytes = output.getvalue()
+    if not updated_bytes:
+        raise RuntimeError("excel_output_empty")
+
+    service = drive_service()
+    media = MediaIoBaseUpload(
+        io.BytesIO(updated_bytes),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        resumable=False,
     )
-    print(
-        f"[EXCEL] START file={source_ref} student={student_name} status={status}"
-    )
+    result = service.files().update(
+        fileId=source_ref,
+        media_body=media,
+        supportsAllDrives=True,
+        fields="id,modifiedTime,size,mimeType,name",
+    ).execute()
 
-    try:
-        file_bytes = download_drive_file_bytes(source_ref)
-        if not file_bytes:
-            raise RuntimeError("excel_download_empty")
-        print(f"[EXCEL] downloaded_bytes={len(file_bytes)}")
+    if str(result.get("id") or "").strip() != source_ref:
+        raise RuntimeError("excel_drive_update_wrong_file")
 
-        wb = openpyxl.load_workbook(
-            io.BytesIO(file_bytes),
-            data_only=False
-        )
-        ws = wb.active
-        cols, header_row = find_excel_columns_for_output(ws)
-        status_col = find_status_column(ws, header_row)
-        email_col = cols.get("email")
+    print(f"[EXCEL] SUCCESS file={source_ref} row={target_row} status={status}")
 
-        target_row = None
-        login = str(
-            student.get("login_identifier") or ""
-        ).strip().lower()
-
-        if email_col is not None and login:
-            for row_idx in range(header_row + 1, ws.max_row + 1):
-                email = str(
-                    ws.cell(row_idx, email_col + 1).value or ""
-                ).strip().lower()
-                if email == login:
-                    target_row = row_idx
-                    break
-
-        if target_row is None and student.get("source_row_number"):
-            candidate = int(student["source_row_number"])
-            if header_row < candidate <= ws.max_row:
-                target_row = candidate
-
-        if target_row is None:
-            raise RuntimeError(f"excel_student_row_not_found:{login}")
-
-        ws.cell(target_row, status_col).value = str(status)
-
-        output = io.BytesIO()
-        wb.save(output)
-        updated_bytes = output.getvalue()
-        if not updated_bytes:
-            raise RuntimeError("excel_output_empty")
-
-        print(
-            f"[EXCEL] prepared row={target_row} status_col={status_col} bytes={len(updated_bytes)}"
-        )
-
-        service = drive_service()
-        media = MediaIoBaseUpload(
-            io.BytesIO(updated_bytes),
-            mimetype=(
-                "application/vnd.openxmlformats-"
-                "officedocument.spreadsheetml.sheet"
-            ),
-            resumable=False,
-        )
-
-        result = (
-            service.files()
-            .update(
-                fileId=source_ref,
-                media_body=media,
-                fields="id,modifiedTime,size,mimeType,name",
-            )
-            .execute()
-        )
-
-        if str(result.get("id") or "").strip() != source_ref:
-            raise RuntimeError(
-                f"excel_drive_update_wrong_file:{result.get('id')}"
-            )
-
-        print(
-            f"[EXCEL] SUCCESS file={source_ref} row={target_row} status={status} modified={result.get('modifiedTime')}"
-        )
-
-    except Exception as exc:
-        print(
-            f"[EXCEL] FAILED file={source_ref} student={student_name} "
-            f"{type(exc).__name__}: {exc}"
-        )
-        raise
-
+# ============================================================
 
 # ============================================================
 # LIVE GOOGLE SHEET UPDATE
