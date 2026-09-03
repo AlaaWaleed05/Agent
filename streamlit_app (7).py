@@ -150,7 +150,7 @@ DRIVE_FOLDER_ID = os.getenv(
     "DRIVE_FOLDER_ID",
     "12L_qSHBnW4-tfQZRteynInWNBAML016f"
 )
-
+EXCEL_BUCKET = "excel-files"
 # Keep fallback pacing aligned with the Worker timing policy.
 LOGIN_PAGE_DELAY_MIN, LOGIN_PAGE_DELAY_MAX = 0.8, 1.5
 POST_LOGIN_DELAY_SECONDS = 1.0
@@ -896,7 +896,67 @@ def drive_service():
         )
     )
 
+EXCEL_BUCKET = "excel-files"
 
+
+def upload_excel_to_storage(
+    file_bytes,
+    filename,
+    office_id
+):
+    safe_filename = os.path.basename(
+        str(filename or "students.xlsx")
+    )
+
+    path = f"{office_id}/{safe_filename}"
+
+    (
+        db()
+        .storage
+        .from_(EXCEL_BUCKET)
+        .upload(
+            path,
+            file_bytes,
+            {
+                "content-type":
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "upsert": "true",
+            },
+        )
+    )
+
+    return path
+
+
+def download_excel_from_storage(
+    file_path
+):
+    return (
+        db()
+        .storage
+        .from_(EXCEL_BUCKET)
+        .download(file_path)
+    )
+
+
+def update_excel_in_storage(
+    file_path,
+    file_bytes
+):
+    return (
+        db()
+        .storage
+        .from_(EXCEL_BUCKET)
+        .upload(
+            file_path,
+            file_bytes,
+            {
+                "content-type":
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "upsert": "true",
+            },
+        )
+    )
 def upload_to_drive(
     file_bytes,
     filename,
@@ -1443,11 +1503,11 @@ def import_students(
                 "ملف Excel غير موجود."
             )
 
-        file_path = upload_to_drive(
-            file_bytes,
-            source_name,
-            ""
-        )
+        file_path = upload_excel_to_storage(
+    file_bytes,
+    source_name,
+    office_id
+)
 
     source = (
         db()
@@ -1517,9 +1577,9 @@ def update_excel_student_status(
             "excel_source_missing"
         )
 
-    file_bytes = download_drive_file_bytes(
-        source_ref
-    )
+    file_bytes = download_excel_from_storage(
+    source_ref
+)
 
     wb = openpyxl.load_workbook(
         io.BytesIO(file_bytes),
@@ -1585,27 +1645,10 @@ def update_excel_student_status(
 
     updated_bytes = output.getvalue()
 
-    service = drive_service()
-
-    media = MediaIoBaseUpload(
-        io.BytesIO(updated_bytes),
-        mimetype=(
-            "application/vnd.openxmlformats-"
-            "officedocument.spreadsheetml.sheet"
-        ),
-        resumable=True,
-    )
-
-    (
-        service
-        .files()
-        .update(
-            fileId=str(source_ref),
-            media_body=media
-        )
-        .execute()
-    )
-
+    update_excel_in_storage(
+    source_ref,
+    updated_bytes
+)
     safe_log(
         f"Live Excel update: "
         f"{student.get('student_name')} "
