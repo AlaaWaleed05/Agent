@@ -2,40 +2,9 @@ from pathlib import Path
 
 APP = Path('streamlit_app (7).py')
 WORKER = Path('worker.py')
-WORKFLOW = Path('.github/workflows/apply-live-table.yml')
 SELF = Path('.github/excel_patch_final.py')
 TRIGGER = Path('.github/excel_final_trigger.txt')
 ONE = Path('.github/excel_patch_once.py')
-
-ORIGINAL_WORKFLOW = '''name: Validate Aivora
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-permissions:
-  contents: read
-
-jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Compile Streamlit app
-        run: python -m py_compile 'streamlit_app (7).py'
-
-      - name: Compile Worker
-        run: python -m py_compile worker.py
-'''
 
 def replace_block(text, start, end, replacement):
     a = text.find(start)
@@ -151,7 +120,6 @@ def update_excel_student_status(source_ref, student, status):
 worker = replace_block(worker, '# ============================================================\n# LIVE EXCEL UPDATE\n# ============================================================', '# ============================================================\n# LIVE GOOGLE SHEET UPDATE\n# ============================================================', worker_live)
 WORKER.write_text(worker, encoding='utf-8')
 
-WORKFLOW.write_text(ORIGINAL_WORKFLOW, encoding='utf-8')
 for path in (SELF, TRIGGER, ONE):
     if path.exists():
         path.unlink()
