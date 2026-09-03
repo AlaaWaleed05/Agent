@@ -1,1 +1,1 @@
-Apply Excel preparation fix after restoring working app - 2026-09-03T00:15:00Z
+restore-and-fix-excel-2026-09-03-2300
