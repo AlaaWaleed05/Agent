@@ -21,8 +21,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Excel-only live patch
-        if: hashFiles('.github/excel_live_marker.txt') != ''
+      - name: Patch Excel live updater only
         shell: python
         run: |
           from pathlib import Path
@@ -49,7 +48,6 @@ def update_excel_student_status(source_ref, student, status):
     source_ref = _excel_text(source_ref)
     if not source_ref:
         raise RuntimeError('excel_source_missing')
-
     file_bytes = download_drive_file_bytes(source_ref)
     if not file_bytes:
         raise RuntimeError('excel_download_empty')
@@ -58,7 +56,6 @@ def update_excel_student_status(source_ref, student, status):
     ws = wb.active
     cols, header_row = _find_excel_layout(ws)
     email_col = cols['email']
-
     status_col = cols.get('status')
     if status_col is None:
         status_col = ws.max_column + 1
@@ -72,24 +69,18 @@ def update_excel_student_status(source_ref, student, status):
         candidate = int(source_row)
         if header_row < candidate <= ws.max_row:
             target_row = candidate
-
     if target_row is not None and login:
-        row_login = _excel_text(ws.cell(target_row, email_col).value).casefold()
-        if row_login != login:
+        if _excel_text(ws.cell(target_row, email_col).value).casefold() != login:
             target_row = None
-
     if target_row is None and login:
         for row_idx in range(header_row + 1, ws.max_row + 1):
-            row_login = _excel_text(ws.cell(row_idx, email_col).value).casefold()
-            if row_login == login:
+            if _excel_text(ws.cell(row_idx, email_col).value).casefold() == login:
                 target_row = row_idx
                 break
-
     if target_row is None:
         raise RuntimeError(f'excel_student_row_not_found:{login}')
 
     ws.cell(target_row, status_col).value = _excel_text(status)
-
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
@@ -109,22 +100,18 @@ def update_excel_student_status(source_ref, student, status):
         supportsAllDrives=True,
         fields='id,modifiedTime,size,mimeType,name',
     ).execute()
-
     if str(result.get('id') or '').strip() != source_ref:
         raise RuntimeError('excel_drive_update_wrong_file')
-
     safe_log(f"Live Excel update: {student.get('student_name')} -> {status}")
 '''
-          app_text = replace_block(
-              app_text,
+          app_text = replace_block(app_text,
               '# =========================================================\n# LIVE EXCEL UPDATE\n# SAME DRIVE FILE\n# =========================================================',
               '# =========================================================\n# LIVE GOOGLE SHEET UPDATE\n# SAME SHEET\n# =========================================================',
-              app_live,
-          )
+              app_live)
           app.write_text(app_text, encoding='utf-8')
 
           worker_text = worker.read_text(encoding='utf-8')
-          worker_live = '''# ============================================================
+          live = '''# ============================================================
 # LIVE EXCEL UPDATE
 # ============================================================
 
@@ -132,7 +119,6 @@ def update_excel_student_status(source_ref, student, status):
     source_ref = _excel_text(source_ref)
     if not source_ref:
         raise RuntimeError('excel_source_missing')
-
     file_bytes = download_drive_file_bytes(source_ref)
     if not file_bytes:
         raise RuntimeError('excel_download_empty')
@@ -141,7 +127,6 @@ def update_excel_student_status(source_ref, student, status):
     ws = wb.active
     cols, header_row = find_excel_columns_for_output(ws)
     status_col = find_status_column(ws, header_row)
-
     login = _excel_text(student.get('login_identifier')).casefold()
     source_row = student.get('source_row_number')
     target_row = None
@@ -150,24 +135,18 @@ def update_excel_student_status(source_ref, student, status):
         candidate = int(source_row)
         if header_row < candidate <= ws.max_row:
             target_row = candidate
-
     if target_row is not None and login:
-        row_login = _excel_text(ws.cell(target_row, cols['email'] + 1).value).casefold()
-        if row_login != login:
+        if _excel_text(ws.cell(target_row, cols['email'] + 1).value).casefold() != login:
             target_row = None
-
     if target_row is None and login:
         for row_idx in range(header_row + 1, ws.max_row + 1):
-            row_login = _excel_text(ws.cell(row_idx, cols['email'] + 1).value).casefold()
-            if row_login == login:
+            if _excel_text(ws.cell(row_idx, cols['email'] + 1).value).casefold() == login:
                 target_row = row_idx
                 break
-
     if target_row is None:
         raise RuntimeError(f'excel_student_row_not_found:{login}')
 
     ws.cell(target_row, status_col).value = _excel_text(status)
-
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
@@ -187,18 +166,14 @@ def update_excel_student_status(source_ref, student, status):
         supportsAllDrives=True,
         fields='id,modifiedTime,size,mimeType,name',
     ).execute()
-
     if str(result.get('id') or '').strip() != source_ref:
         raise RuntimeError('excel_drive_update_wrong_file')
-
     print(f'[EXCEL] SUCCESS file={source_ref} row={target_row} status={status}')
 '''
-          worker_text = replace_block(
-              worker_text,
-              '# ============================================================\n# LIVE EXCEL UPDATE\n# ============================================================',
-              '# ============================================================\n# LIVE GOOGLE SHEET UPDATE\n# ============================================================',
-              worker_live,
-          )
+
+          live_start = '# ============================================================\n# LIVE EXCEL UPDATE\n# ============================================================'
+          live_end = '# ============================================================\n# LIVE GOOGLE SHEET UPDATE\n# ============================================================'
+          worker_text = replace_block(worker_text, live_start, live_end, live)
           worker.write_text(worker_text, encoding='utf-8')
 
       - name: Compile Streamlit app
@@ -207,14 +182,13 @@ def update_excel_student_status(source_ref, student, status):
       - name: Compile Worker
         run: python -m py_compile worker.py
 
-      - name: Commit Excel patch only when marker exists
-        if: hashFiles('.github/excel_live_marker.txt') != ''
+      - name: Commit Excel patch if changed
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git rm -f .github/excel_live_marker.txt
-          git checkout HEAD~0 -- .github/workflows/apply-live-table.yml
-          git add 'streamlit_app (7).py' worker.py .github/workflows/apply-live-table.yml
-          git commit -m 'Fix Excel live status update [skip ci]'
-          git push origin main
+          git add 'streamlit_app (7).py' worker.py
+          if ! git diff --cached --quiet; then
+            git commit -m 'Fix Excel live status updates [skip ci]'
+            git push origin main
+          fi
