@@ -3815,8 +3815,7 @@ if (
     with left:
 
         st.markdown(
-            """
-<div style="padding:40px 20px 20px 10px;">
+            """<div style="padding:40px 20px 20px 10px;">
     <div style="font-size:14px;color:#2563eb;font-weight:800;margin-bottom:8px;">
         حل بسيط لإدارة المتابعة
     </div>
@@ -4147,8 +4146,7 @@ office_id = office["id"]
 # =========================================================
 
 st.markdown(
-    """
-<div class="topbar">
+    """<div class="topbar">
     <div class="brand">
         <div class="brand-icon">✨</div>
         <div>
