@@ -1,0 +1,52 @@
+name: Restore missing Google Sheets helpers
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore helpers if missing
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("streamlit_app (7).py")
+          text = path.read_text(encoding="utf-8")
+
+          if "def get_saved_gsheet_link(" in text and "def save_gsheet_link(" in text:
+              print("Google Sheets helpers already present; nothing to do.")
+              raise SystemExit(0)
+
+          anchor = "# =========================================================\n# EXCEL\n# =========================================================\n"
+          if anchor not in text:
+              raise SystemExit("Excel section anchor not found")
+
+          block = '''def get_saved_gsheet_link(office_id):\n\n    try:\n\n        rows = (\n            db()\n            .table("data_sources")\n            .select("source_url,created_at")\n            .eq("office_id", office_id)\n            .eq("source_type", "google_sheet")\n            .not_.is_("source_url", "null")\n            .order("created_at", desc=True)\n            .limit(1)\n            .execute()\n            .data\n            or []\n        )\n\n        return (\n            rows[0].get("source_url")\n            if rows\n            else None\n        )\n\n    except Exception:\n        return None\n\n\ndef save_gsheet_link(office_id, link):\n\n    try:\n\n        if not extract_sheet_id(link):\n            return False, "الرابط غير صحيح!"\n\n        (\n            db()\n            .table("data_sources")\n            .insert({\n                "office_id": office_id,\n                "source_type": "google_sheet",\n                "source_name": "Google Sheet",\n                "source_url": link,\n                "column_mapping": {},\n            })\n            .execute()\n        )\n\n        return True, "تم حفظ الرابط بنجاح"\n\n    except Exception:\n        safe_log("Google Sheet link save failed")\n        return False, "تعذر حفظ الرابط حاليًا."\n\n\n'''
+
+          text = text.replace(anchor, block + anchor, 1)
+          path.write_text(text, encoding="utf-8")
+          print("Restored Google Sheets helper functions.")
+          PY
+
+      - name: Validate app
+        run: |
+          python -m py_compile "streamlit_app (7).py"
+
+      - name: Commit app fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "streamlit_app (7).py"
+          if git diff --cached --quiet; then
+            echo "No app changes to commit."
+          else
+            git commit -m "fix: restore Google Sheets helpers"
+            git push
+          fi
