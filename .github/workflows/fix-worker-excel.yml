@@ -1,0 +1,83 @@
+name: One-time worker Excel cleanup
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-worker:
+    if: ${{ !contains(github.event.head_commit.message, '[worker-excel-fixed]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch worker.py
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          path = Path('worker.py')
+          text = path.read_text(encoding='utf-8')
+
+          if 'def download_drive_file_bytes' not in text:
+              print('worker already patched')
+              raise SystemExit(0)
+
+          text = text.replace(
+              'from googleapiclient.discovery import build\n',
+              ''
+          )
+          text = text.replace(
+              'from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload\n',
+              ''
+          )
+
+          text = re.sub(
+              r'\nDRIVE_FOLDER_ID = \(\n    os\.environ\.get\("DRIVE_FOLDER_ID"\)\n    or "12L_qSHBnW4-tfQZRteynInWNBAML016f"\n\)\n',
+              '\n',
+              text,
+              count=1,
+          )
+
+          text = re.sub(
+              r'\n\ndef drive_service\(\):\n.*?\n\n\n# ============================================================\n# GOOGLE DRIVE / EXCEL\n# ============================================================\n',
+              '\n\n# ============================================================\n# EXCEL / SUPABASE STORAGE\n# ============================================================\n',
+              text,
+              count=1,
+              flags=re.S,
+          )
+
+          text = re.sub(
+              r'\n\ndef download_drive_file_bytes\(file_id\):.*?\n# ============================================================\n# END GOOGLE DRIVE / EXCEL\n# ============================================================\n',
+              '''\n\ndef download_excel_from_storage(file_path):\n    file_path = _excel_text(file_path)\n    if not file_path:\n        raise RuntimeError("excel_source_missing")\n    data = db.storage.from_(EXCEL_BUCKET).download(file_path)\n    if not data:\n        raise RuntimeError("excel_download_empty")\n    return data\n\ndef upload_excel_to_storage(file_path, file_bytes):\n    file_path = _excel_text(file_path)\n    if not file_path:\n        raise RuntimeError("excel_source_missing")\n    if not file_bytes:\n        raise RuntimeError("excel_upload_empty")\n    return db.storage.from_(EXCEL_BUCKET).upload(\n        file_path,\n        file_bytes,\n        {\n            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",\n            "upsert": "true",\n        },\n    )\n\n# ============================================================\n# END EXCEL / SUPABASE STORAGE\n# ============================================================\n''',
+              text,
+              count=1,
+              flags=re.S,
+          )
+
+          old_excel_finalize = re.compile(
+              r'    if source_type == "excel":.*?        return final_id\n',
+              re.S,
+          )
+          replacement = '''    if source_type == "excel":\n\n        source_ref = str(\n            job.get("source_ref")\n            or ""\n        ).strip()\n\n        if not source_ref:\n            raise RuntimeError("excel_source_missing")\n\n        # Excel is updated live in the same Supabase Storage object\n        # after each student. No second output file is created.\n        db.table("jobs").update({\n            "error": None\n        }).eq(\n            "id",\n            job["id"]\n        ).execute()\n\n        return source_ref\n'''
+          text, n = old_excel_finalize.subn(replacement, text, count=1)
+          if n != 1:
+              raise RuntimeError('excel finalizer block not found')
+
+          path.write_text(text, encoding='utf-8')
+
+      - name: Compile worker
+        run: python -m py_compile worker.py
+
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add worker.py
+          git diff --cached --quiet || git commit -m "Remove Drive Excel handling [worker-excel-fixed]"
+          git push
