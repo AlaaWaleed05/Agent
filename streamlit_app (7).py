@@ -113,7 +113,6 @@ def fallback_delay(a, b):
 # =========================================================
 
 def get_office_by_name(name):
-
     rows = (
         db()
         .table("offices")
@@ -406,8 +405,6 @@ def get_google_credentials(scopes):
     raise RuntimeError(
         "Google service account configuration missing"
     )
-
-
 def get_gsheet_client():
 
     if gspread is None or Credentials is None:
@@ -767,25 +764,15 @@ def get_google_credentials(scopes):
         "gcp_service_account"
     )
 
-    if creds_dict:
+    if isinstance(creds_dict, dict):
 
-        try:
-            creds_dict = dict(creds_dict)
-        except Exception:
-            pass
-
-        if (
-            hasattr(creds_dict, "get")
-            and creds_dict.get("client_email")
-            and creds_dict.get("private_key")
-        ):
-            return (
-                Credentials
-                .from_service_account_info(
-                    creds_dict,
-                    scopes=scopes
-                )
+        return (
+            Credentials
+            .from_service_account_info(
+                creds_dict,
+                scopes=scopes
             )
+        )
 
     raw = st.secrets.get(
         "GCP_SERVICE_ACCOUNT_JSON",
@@ -794,51 +781,10 @@ def get_google_credentials(scopes):
 
     if raw:
 
-        data = (
-            json.loads(raw)
-            if isinstance(raw, str)
-            else dict(raw)
-        )
-
         return (
             Credentials
             .from_service_account_info(
-                data,
-                scopes=scopes
-            )
-        )
-
-    raw = st.secrets.get(
-        "GOOGLE_SERVICE_ACCOUNT_JSON",
-        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    )
-
-    if raw:
-
-        data = (
-            json.loads(raw)
-            if isinstance(raw, str)
-            else dict(raw)
-        )
-
-        return (
-            Credentials
-            .from_service_account_info(
-                data,
-                scopes=scopes
-            )
-        )
-
-    credentials_file = os.getenv(
-        "GOOGLE_APPLICATION_CREDENTIALS"
-    )
-
-    if credentials_file:
-
-        return (
-            Credentials
-            .from_service_account_file(
-                credentials_file,
+                json.loads(raw),
                 scopes=scopes
             )
         )
@@ -2999,6 +2945,7 @@ def _run_legacy_api_fallback(
                             status
                     })
                     .execute()
+                )
 
             except Exception as exc:
 
@@ -3241,7 +3188,8 @@ def _run_legacy_api_fallback(
 
                 safe_log(
                     f"live retry source update failed "
-                    f"for {name}: {type(exc).__name__}: {exc}"
+                    f"for {name}: "
+                    f"{type(exc).__name__}: {exc}"
                 )
 
             # =========================================================
