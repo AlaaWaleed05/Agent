@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 
 from googleapiclient.discovery import build
@@ -1219,128 +1220,104 @@ def import_students(
     source_url=None
 ):
 
-    if source_type in {
-        "xlsx",
-        "xls",
-        "excel"
-    }:
-
-        records = parse_excel_bytes(
-            file_bytes
-        )
-
-    else:
-
-        rows = read_gsheet_rows(
-            source_url
-        )
-
-        if not rows:
-            raise ValueError(
-                "الشيت فاضي."
-            )
-
-        wb = openpyxl.Workbook()
-
-        ws = wb.active
-
-        for row in rows:
-            ws.append(row)
-
-        out = io.BytesIO()
-
-        wb.save(out)
-
-        records = parse_excel_bytes(
-            out.getvalue()
-        )
-
-    if not records:
-        raise ValueError(
-            "مش لاقي طلاب عندهم إيميل وباسورد صالحين."
-        )
-
-    encryption_key = st.secrets.get(
-        "STUDENT_PASSWORD_ENCRYPTION_KEY",
-        os.getenv(
-            "STUDENT_PASSWORD_ENCRYPTION_KEY"
-        )
+    safe_log(
+        f"[EXCEL PREP] start source_type={source_type!r}, "
+        f"source_name={source_name!r}"
     )
 
-    source_type = (
-        "google_sheet"
-        if source_type in {
-            "gsheet",
+    try:
+        if source_type in {"xlsx", "xls", "excel"}:
+            if not file_bytes:
+                raise ValueError("ملف Excel غير موجود.")
+            safe_log("[EXCEL PREP] parsing Excel")
+            records = parse_excel_bytes(file_bytes)
+            safe_log(f"[EXCEL PREP] parsed valid records={len(records)}")
+        else:
+            safe_log("[EXCEL PREP] reading Google Sheet")
+            rows = read_gsheet_rows(source_url)
+            if not rows:
+                raise ValueError("الشيت فاضي.")
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            for row in rows:
+                ws.append(row)
+            out = io.BytesIO()
+            wb.save(out)
+            records = parse_excel_bytes(out.getvalue())
+            safe_log(f"[EXCEL PREP] parsed valid records={len(records)}")
+
+        if not records:
+            raise ValueError("مش لاقي طلاب عندهم إيميل وباسورد صالحين.")
+
+        encryption_key = st.secrets.get(
+            "STUDENT_PASSWORD_ENCRYPTION_KEY",
+            os.getenv("STUDENT_PASSWORD_ENCRYPTION_KEY")
+        )
+        if not encryption_key:
+            raise RuntimeError("Encryption key missing")
+        safe_log("[EXCEL PREP] encryption key available")
+
+        source_type = (
             "google_sheet"
-        }
-        else "excel"
-    )
-
-    file_path = None
-
-    if source_type == "excel":
-
-        if not file_bytes:
-            raise ValueError(
-                "ملف Excel غير موجود."
-            )
-
-        file_path = upload_to_drive(
-            file_bytes,
-            source_name,
-            ""
+            if source_type in {"gsheet", "google_sheet"}
+            else "excel"
         )
 
-    source = (
-        db()
-        .table("data_sources")
-        .insert({
-            "office_id": office_id,
-            "source_type": source_type,
-            "source_name": source_name,
-            "source_url": source_url,
-            "file_path": file_path,
-            "column_mapping": {},
-        })
-        .execute()
-        .data[0]
-    )
+        file_path = None
+        if source_type == "excel":
+            safe_log("[EXCEL PREP] uploading Excel to Drive")
+            file_path = upload_to_drive(file_bytes, source_name, "")
+            if not file_path:
+                raise RuntimeError("Excel Drive upload returned no file id")
+            safe_log("[EXCEL PREP] Drive upload succeeded")
 
-    payload = [
-        {
-            "office_id": office_id,
-            "data_source_id": source["id"],
-            "source_row_number": r[
-                "source_row_number"
-            ],
-            "student_name": r[
-                "student_name"
-            ],
-            "login_identifier": r[
-                "login_identifier"
-            ],
-            "encrypted_password":
-                encrypt_password(
-                    r["password"],
-                    encryption_key
-                ),
-            "application_status": "",
-            "original_data": r[
-                "original_data"
-            ],
-            "updated_at": now_iso(),
-        }
-        for r in records
-    ]
+        safe_log("[EXCEL PREP] inserting data source")
+        source_response = (
+            db()
+            .table("data_sources")
+            .insert({
+                "office_id": office_id,
+                "source_type": source_type,
+                "source_name": source_name,
+                "source_url": source_url,
+                "file_path": file_path,
+                "column_mapping": {},
+            })
+            .execute()
+        )
+        source_rows = source_response.data or []
+        if not source_rows:
+            raise RuntimeError("data_sources insert returned no row")
+        source = source_rows[0]
+        safe_log(f"[EXCEL PREP] data source created id={source.get('id')}")
 
-    (
-        db()
-        .table("student_records")
-        .insert(payload)
-        .execute()
-    )
+        safe_log(f"[EXCEL PREP] preparing student payload count={len(records)}")
+        payload = [
+            {
+                "office_id": office_id,
+                "data_source_id": source["id"],
+                "source_row_number": r["source_row_number"],
+                "student_name": r["student_name"],
+                "login_identifier": r["login_identifier"],
+                "encrypted_password": encrypt_password(r["password"], encryption_key),
+                "application_status": "",
+                "original_data": r["original_data"],
+                "updated_at": now_iso(),
+            }
+            for r in records
+        ]
 
-    return source, len(payload)
+        safe_log("[EXCEL PREP] inserting student records")
+        db().table("student_records").insert(payload).execute()
+        safe_log(f"[EXCEL PREP] SUCCESS imported={len(payload)}")
+        return source, len(payload)
+
+    except Exception as exc:
+        safe_log(
+            f"[EXCEL PREP] FAILED type={type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
+        raise
 
 
 # =========================================================
@@ -4613,7 +4590,7 @@ if (
 
             st.error(
                 "تعذر تجهيز التحديث حاليًا. "
-                "حاولي مرة تانية."
+                f"السبب: {type(exc).__name__}: {exc}"
             )
 
         finally:
