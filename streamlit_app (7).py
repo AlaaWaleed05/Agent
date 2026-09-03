@@ -1,3 +1,114 @@
+def update_excel_student_status(
+    source_ref,
+    student,
+    status
+):
+
+    if not source_ref:
+        raise RuntimeError(
+            "excel_source_missing"
+        )
+
+    file_bytes = download_drive_file_bytes(
+        source_ref
+    )
+
+    wb = openpyxl.load_workbook(
+        io.BytesIO(file_bytes),
+        data_only=False
+    )
+
+    ws = wb.active
+
+    cols, header_row = find_excel_columns(
+        ws
+    )
+
+    status_col = (
+        find_status_column_for_output(
+            ws,
+            header_row
+        )
+    )
+
+    source_row = student.get(
+        "source_row_number"
+    )
+
+    if not source_row:
+
+        login = str(
+            student.get(
+                "login_identifier"
+            ) or ""
+        ).strip().lower()
+
+        for row_idx in range(
+            header_row + 1,
+            ws.max_row + 1
+        ):
+
+            email = str(
+                ws.cell(
+                    row_idx,
+                    cols["email"] + 1
+                ).value or ""
+            ).strip().lower()
+
+            if email == login:
+
+                source_row = row_idx
+
+                break
+
+    if not source_row:
+        raise RuntimeError(
+            "excel_student_row_missing"
+        )
+
+    ws.cell(
+        int(source_row),
+        status_col
+    ).value = status
+
+    output = io.BytesIO()
+
+    wb.save(output)
+
+    updated_bytes = output.getvalue()
+
+    service = drive_service()
+
+    media = MediaIoBaseUpload(
+        io.BytesIO(updated_bytes),
+        mimetype=(
+            "application/vnd.openxmlformats-"
+            "officedocument.spreadsheetml.sheet"
+        ),
+        resumable=True,
+    )
+
+    (
+        service
+        .files()
+        .update(
+            fileId=str(source_ref),
+            media_body=media
+        )
+        .execute()
+    )
+
+    safe_log(
+        f"Live Excel update: "
+        f"{student.get('student_name')} "
+        f"-> {status}"
+    )
+
+
+# =========================================================
+# LIVE GOOGLE SHEET UPDATE
+# SAME SHEET
+# =========================================================
 """
 Aivora - Agent
 Your Smarter Support for Every Student's Application
@@ -692,66 +803,19 @@ def get_google_credentials(scopes):
             "Google credentials libraries unavailable"
         )
 
-    # Prefer direct Streamlit secret variables when they are available.
-    # This keeps GCP credentials independent from the nested TOML section.
-    direct = {
-        "type": "service_account",
-        "project_id": st.secrets.get(
-            "GCP_PROJECT_ID",
-            os.getenv("GCP_PROJECT_ID")
-        ),
-        "private_key_id": st.secrets.get(
-            "GCP_PRIVATE_KEY_ID",
-            os.getenv("GCP_PRIVATE_KEY_ID")
-        ),
-        "private_key": st.secrets.get(
-            "GCP_PRIVATE_KEY",
-            os.getenv("GCP_PRIVATE_KEY")
-        ),
-        "client_email": st.secrets.get(
-            "GCP_CLIENT_EMAIL",
-            os.getenv("GCP_CLIENT_EMAIL")
-        ),
-        "client_id": st.secrets.get(
-            "GCP_CLIENT_ID",
-            os.getenv("GCP_CLIENT_ID")
-        ),
-        "auth_uri": st.secrets.get(
-            "GCP_AUTH_URI",
-            os.getenv("GCP_AUTH_URI", "https://accounts.google.com/o/oauth2/auth")
-        ),
-        "token_uri": st.secrets.get(
-            "GCP_TOKEN_URI",
-            os.getenv("GCP_TOKEN_URI", "https://oauth2.googleapis.com/token")
-        ),
-    }
+    creds_dict = st.secrets.get(
+        "gcp_service_account"
+    )
 
-    if direct.get("client_email") and direct.get("private_key"):
-        if isinstance(direct["private_key"], str):
-            direct["private_key"] = direct["private_key"].replace("\\n", "\n")
-        return Credentials.from_service_account_info(
-            direct,
-            scopes=scopes
-        )
+    if isinstance(creds_dict, dict):
 
-    # Keep the existing nested secret as a fallback so Google Sheets keeps working.
-    creds_dict = st.secrets.get("gcp_service_account")
-
-    if creds_dict:
-        try:
-            creds_dict = dict(creds_dict)
-        except Exception:
-            pass
-
-        if (
-            hasattr(creds_dict, "get")
-            and creds_dict.get("client_email")
-            and creds_dict.get("private_key")
-        ):
-            return Credentials.from_service_account_info(
+        return (
+            Credentials
+            .from_service_account_info(
                 creds_dict,
                 scopes=scopes
             )
+        )
 
     raw = st.secrets.get(
         "GCP_SERVICE_ACCOUNT_JSON",
@@ -759,19 +823,19 @@ def get_google_credentials(scopes):
     )
 
     if raw:
-        data = (
-            json.loads(raw)
-            if isinstance(raw, str)
-            else dict(raw)
-        )
-        return Credentials.from_service_account_info(
-            data,
-            scopes=scopes
+
+        return (
+            Credentials
+            .from_service_account_info(
+                json.loads(raw),
+                scopes=scopes
+            )
         )
 
     raise RuntimeError(
         "Google service account configuration missing"
     )
+
 
 def drive_service():
 
