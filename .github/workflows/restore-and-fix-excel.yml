@@ -1,0 +1,207 @@
+name: Restore Aivora and fix Excel live update
+
+on:
+  push:
+    paths:
+      - ".github/excel_prep_fix_trigger.txt"
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Restore last good app version
+        run: git checkout 1c1c9021a2ebfbbb87502d0d79cabf8985519051 -- "streamlit_app (7).py"
+
+      - name: Replace only Excel live-update function
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("streamlit_app (7).py")
+          s = p.read_text(encoding="utf-8")
+
+          pattern = r'''def update_excel_student_status\(\n    source_ref,\n    student,\n    status\n\):\n.*?\n\n\n# =========================================================\n# LIVE GOOGLE SHEET UPDATE'''
+
+          replacement = '''def update_excel_student_status(
+    source_ref,
+    student,
+    status
+):
+
+    """Update one student's status in the original Excel file on Drive."""
+
+    source_ref = str(source_ref or "").strip()
+
+    if not source_ref:
+        raise RuntimeError(
+            "excel_source_missing"
+        )
+
+    login = str(
+        student.get("login_identifier") or ""
+    ).strip().lower()
+
+    if not login:
+        raise RuntimeError(
+            "excel_student_email_missing"
+        )
+
+    file_bytes = download_drive_file_bytes(
+        source_ref
+    )
+
+    if not file_bytes:
+        raise RuntimeError(
+            "excel_drive_download_empty"
+        )
+
+    wb = openpyxl.load_workbook(
+        io.BytesIO(file_bytes),
+        data_only=False
+    )
+
+    ws = wb.active
+
+    cols, header_row = find_excel_columns(
+        ws
+    )
+
+    status_col = find_status_column_for_output(
+        ws,
+        header_row
+    )
+
+    target_row = None
+    source_row = student.get(
+        "source_row_number"
+    )
+
+    if source_row:
+        candidate = int(source_row)
+        if (
+            candidate > header_row
+            and candidate <= ws.max_row
+        ):
+            candidate_login = str(
+                ws.cell(
+                    candidate,
+                    cols["email"] + 1
+                ).value or ""
+            ).strip().lower()
+
+            if candidate_login == login:
+                target_row = candidate
+
+    if target_row is None:
+        for row_idx in range(
+            header_row + 1,
+            ws.max_row + 1
+        ):
+            row_login = str(
+                ws.cell(
+                    row_idx,
+                    cols["email"] + 1
+                ).value or ""
+            ).strip().lower()
+
+            if row_login == login:
+                target_row = row_idx
+                break
+
+    if target_row is None:
+        raise RuntimeError(
+            "excel_student_row_missing"
+        )
+
+    ws.cell(
+        target_row,
+        status_col
+    ).value = str(status or "")
+
+    output = io.BytesIO()
+
+    wb.save(output)
+
+    updated_bytes = output.getvalue()
+
+    if not updated_bytes:
+        raise RuntimeError(
+            "excel_updated_file_empty"
+        )
+
+    service = drive_service()
+
+    media = MediaIoBaseUpload(
+        io.BytesIO(updated_bytes),
+        mimetype=(
+            "application/vnd.openxmlformats-"
+            "officedocument.spreadsheetml.sheet"
+        ),
+        resumable=False,
+    )
+
+    result = (
+        service
+        .files()
+        .update(
+            fileId=source_ref,
+            body={"name": str(student.get("source_file_name") or "students.xlsx")},
+            media_body=media,
+            fields="id,modifiedTime,size,mimeType,name"
+        )
+        .execute()
+    )
+
+    if str(result.get("id") or "") != source_ref:
+        raise RuntimeError(
+            "excel_drive_update_id_mismatch"
+        )
+
+    safe_log(
+        f"Live Excel update: "
+        f"{student.get('student_name')} "
+        f"({login}) -> {status} "
+        f"row={target_row}"
+    )
+
+
+# =========================================================
+# LIVE GOOGLE SHEET UPDATE'''
+
+          new_s, count = re.subn(
+              pattern,
+              replacement,
+              s,
+              count=1,
+              flags=re.S
+          )
+
+          if count != 1:
+              raise SystemExit("Excel live-update function not found")
+
+          compile(new_s, "streamlit_app (7).py", "exec")
+          p.write_text(new_s, encoding="utf-8")
+          PY
+
+      - name: Verify
+        run: |
+          python -m py_compile "streamlit_app (7).py"
+          grep -n "def update_excel_student_status" "streamlit_app (7).py"
+
+      - name: Commit fixed app
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "streamlit_app (7).py"
+          git commit -m "Fix Excel live status update without changing other logic"
+          git push origin main
