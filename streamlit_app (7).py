@@ -777,16 +777,23 @@ def upload_to_drive(
         resumable=True,
     )
 
-    return (
+    result = (
         service
         .files()
         .create(
             body=metadata,
             media_body=media,
+            supportsAllDrives=True,
             fields="id"
         )
-        .execute()["id"]
+        .execute()
     )
+
+    file_id = str(result.get("id") or "").strip()
+    if not file_id:
+        raise RuntimeError("excel_drive_upload_missing_id")
+
+    return file_id
 
 
 def download_drive_file_bytes(file_id):
