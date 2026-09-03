@@ -3815,24 +3815,25 @@ if (
     with left:
 
         st.markdown(
-            """<div style="padding:40px 20px 20px 10px;">
-    <div style="font-size:14px;color:#2563eb;font-weight:800;margin-bottom:8px;">
+            """
+<div style="padding:40px 20px 20px 10px;">
+<div style="font-size:14px;color:#2563eb;font-weight:800;margin-bottom:8px;">
         حل بسيط لإدارة المتابعة
-    </div>
+</div>
 
-    <div style="font-size:31px;font-weight:800;color:#111827;line-height:1.35;">
+<div style="font-size:31px;font-weight:800;color:#111827;line-height:1.35;">
         تابع طلبات طلابك<br>من مكان واحد.
-    </div>
+</div>
 
-    <div style="font-size:15px;color:#6b7280;line-height:1.9;margin-top:12px;max-width:480px;">
+<div style="font-size:15px;color:#6b7280;line-height:1.9;margin-top:12px;max-width:480px;">
         حدّث حالات الطلبات، اربط Google Sheets، وابحث عن أي طالب بسرعة بدون متابعة يدوية.
-    </div>
+</div>
 
-    <div style="margin-top:22px;color:#374151;font-size:14px;line-height:2.2;">
+<div style="margin-top:22px;color:#374151;font-size:14px;line-height:2.2;">
         ✓ تحديث حالات الطلاب بشكل منظم<br>
         ✓ حفظ مصدر البيانات للمكتب<br>
         ✓ بحث سريع عن حالة أي طالب
-    </div>
+</div>
 </div>
 """,
             unsafe_allow_html=True
@@ -4179,8 +4180,7 @@ _greeting = (
 )
 
 st.markdown(
-    f"""
-<div class="hero">
+    f""" <div class="hero">
     <div class="hero-kicker">
         {_greeting} 👋
     </div>
