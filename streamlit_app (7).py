@@ -340,49 +340,6 @@ def get_google_credentials(scopes):
             "Google credentials libraries unavailable"
         )
 
-    # Prefer direct Streamlit secret variables when they are available.
-    # This keeps GCP credentials independent from the nested TOML section.
-    direct = {
-        "type": "service_account",
-        "project_id": st.secrets.get(
-            "GCP_PROJECT_ID",
-            os.getenv("GCP_PROJECT_ID")
-        ),
-        "private_key_id": st.secrets.get(
-            "GCP_PRIVATE_KEY_ID",
-            os.getenv("GCP_PRIVATE_KEY_ID")
-        ),
-        "private_key": st.secrets.get(
-            "GCP_PRIVATE_KEY",
-            os.getenv("GCP_PRIVATE_KEY")
-        ),
-        "client_email": st.secrets.get(
-            "GCP_CLIENT_EMAIL",
-            os.getenv("GCP_CLIENT_EMAIL")
-        ),
-        "client_id": st.secrets.get(
-            "GCP_CLIENT_ID",
-            os.getenv("GCP_CLIENT_ID")
-        ),
-        "auth_uri": st.secrets.get(
-            "GCP_AUTH_URI",
-            os.getenv("GCP_AUTH_URI", "https://accounts.google.com/o/oauth2/auth")
-        ),
-        "token_uri": st.secrets.get(
-            "GCP_TOKEN_URI",
-            os.getenv("GCP_TOKEN_URI", "https://oauth2.googleapis.com/token")
-        ),
-    }
-
-    if direct.get("client_email") and direct.get("private_key"):
-        if isinstance(direct["private_key"], str):
-            direct["private_key"] = direct["private_key"].replace("\\n", "\n")
-        return Credentials.from_service_account_info(
-            direct,
-            scopes=scopes
-        )
-
-    # Keep the existing nested secret as a fallback so Google Sheets keeps working.
     creds_dict = st.secrets.get("gcp_service_account")
 
     if creds_dict:
@@ -412,14 +369,374 @@ def get_google_credentials(scopes):
             if isinstance(raw, str)
             else dict(raw)
         )
+
         return Credentials.from_service_account_info(
             data,
+            scopes=scopes
+        )
+
+    raw = st.secrets.get(
+        "GOOGLE_SERVICE_ACCOUNT_JSON",
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    )
+
+    if raw:
+        data = (
+            json.loads(raw)
+            if isinstance(raw, str)
+            else dict(raw)
+        )
+
+        return Credentials.from_service_account_info(
+            data,
+            scopes=scopes
+        )
+
+    credentials_file = os.getenv(
+        "GOOGLE_APPLICATION_CREDENTIALS"
+    )
+
+    if credentials_file:
+        return Credentials.from_service_account_file(
+            credentials_file,
             scopes=scopes
         )
 
     raise RuntimeError(
         "Google service account configuration missing"
     )
+def get_gsheet_client():
+
+    if gspread is None or Credentials is None:
+        raise RuntimeError(
+            "Google Sheets libraries unavailable"
+        )
+
+    creds = get_google_credentials([
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive",
+    ])
+
+    return gspread.authorize(creds)
+
+
+def extract_sheet_id(link):
+
+    match = re.search(
+        r"/spreadsheets/d/([a-zA-Z0-9-_]+)",
+        str(link)
+    )
+
+    return match.group(1) if match else None
+
+
+def extract_gid(link):
+
+    match = re.search(
+        r"[?#&]gid=(\d+)",
+        str(link)
+    )
+
+    return int(match.group(1)) if match else None
+
+
+def read_gsheet_rows(link):
+
+    sheet_id = extract_sheet_id(link)
+
+    if not sheet_id:
+        raise ValueError(
+            "رابط Google Sheets غير صحيح."
+        )
+
+    spreadsheet = (
+        get_gsheet_client()
+        .open_by_key(sheet_id)
+    )
+
+    gid = extract_gid(link)
+
+    worksheet = (
+        next(
+            (
+                w
+                for w in spreadsheet.worksheets()
+                if w.id == gid
+            ),
+            spreadsheet.sheet1
+        )
+        if gid is not None
+        else spreadsheet.sheet1
+    )
+
+    return worksheet.get_all_values()
+
+
+def get_saved_gsheet_link(office_id):
+
+    try:
+
+        rows = (
+            db()
+            .table("data_sources")
+            .select(
+                "source_url,created_at"
+            )
+            .eq(
+                "office_id",
+                office_id
+            )
+            .eq(
+                "source_type",
+                "google_sheet"
+            )
+            .not_.is_(
+                "source_url",
+                "null"
+            )
+            .order(
+                "created_at",
+                desc=True
+            )
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+
+        return (
+            rows[0].get("source_url")
+            if rows
+            else None
+        )
+
+    except Exception:
+        return None
+
+
+def save_gsheet_link(office_id, link):
+
+    try:
+
+        if not extract_sheet_id(link):
+            return False, "الرابط غير صحيح!"
+
+        (
+            db()
+            .table("data_sources")
+            .insert({
+                "office_id": office_id,
+                "source_type": "google_sheet",
+                "source_name": "Google Sheet",
+                "source_url": link,
+                "column_mapping": {},
+            })
+            .execute()
+        )
+
+        return (
+            True,
+            "تم حفظ الرابط بنجاح"
+        )
+
+    except Exception:
+
+        safe_log(
+            "Google Sheet link save failed"
+        )
+
+        return (
+            False,
+            "تعذر حفظ الرابط حاليًا."
+        )
+
+
+# =========================================================
+# EXCEL
+# =========================================================
+
+def _excel_text(value):
+    return "" if value is None else str(value).strip()
+
+def _excel_normalize_header(value):
+    value = _excel_text(value).lower()
+    return re.sub(r"[\s_\-]+", "", value)
+
+def _excel_header_kind(value):
+    low = _excel_normalize_header(value)
+    if ("email" in low or "mail" in low or
+            any(x in low for x in ("بريد", "ايميل", "إيميل", "يميل"))):
+        return "email"
+    if ("password" in low or "pass" in low or
+            any(x in low for x in ("باسورد", "كلمةالمرور", "كلمهالمرور", "كلمةالسر", "كلمهالسر"))):
+        return "password"
+    if "name" in low or "اسم" in low:
+        return "name"
+    if (low in {"حالةالطلب", "الحالة", "status"} or
+            ("حالة" in low and "اسم" not in low and "خدمة" not in low)):
+        return "status"
+    return None
+
+def _find_excel_layout(ws):
+    best = None
+    for row_idx in range(1, min(20, ws.max_row) + 1):
+        found = {}
+        for col_idx, cell in enumerate(ws[row_idx], start=1):
+            kind = _excel_header_kind(cell.value)
+            if kind and kind not in found:
+                found[kind] = col_idx
+        score = ((2 if "email" in found else 0) +
+                 (2 if "password" in found else 0) +
+                 (1 if "name" in found else 0) +
+                 (1 if "status" in found else 0))
+        if score >= 4 and "email" in found and "password" in found:
+            return found, row_idx
+        if best is None or score > best[0]:
+            best = (score, found, row_idx)
+    if best and "email" in best[1] and "password" in best[1]:
+        return best[1], best[2]
+    raise ValueError("ملف Excel لازم يحتوي على أعمدة الإيميل والباسورد.")
+
+def find_excel_columns(ws):
+    cols, header_row = _find_excel_layout(ws)
+    return {
+        "name": cols.get("name", cols["email"]) - 1,
+        "email": cols["email"] - 1,
+        "password": cols["password"] - 1,
+    }, header_row
+
+def find_status_column_for_output(ws, header_row):
+    cols, _ = _find_excel_layout(ws)
+    if "status" in cols:
+        return cols["status"]
+    new_col = ws.max_column + 1
+    ws.cell(header_row, new_col).value = "حالة الطلب"
+    return new_col
+
+def parse_excel_bytes(file_bytes):
+    if not file_bytes:
+        raise ValueError("ملف Excel غير موجود.")
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False, read_only=False)
+    except Exception as exc:
+        raise ValueError("تعذر قراءة ملف Excel. استخدمي ملف .xlsx صالح.") from exc
+
+    ws = wb.active
+    cols, header_row = find_excel_columns(ws)
+    records = []
+    seen = set()
+
+    for excel_row, row in enumerate(
+        ws.iter_rows(min_row=header_row + 1, values_only=True),
+        start=header_row + 1,
+    ):
+        values = list(row)
+
+        def cell_at(key):
+            idx = cols[key]
+            return _excel_text(values[idx]) if idx < len(values) else ""
+
+        email = cell_at("email")
+        password = cell_at("password")
+        name = cell_at("name") or email
+        key = email.casefold()
+
+        if not email or not password or key in seen:
+            continue
+
+        seen.add(key)
+        records.append({
+            "source_row_number": excel_row,
+            "student_name": name,
+            "login_identifier": email,
+            "password": password,
+            "original_data": {
+                f"column_{i + 1}": _excel_text(value)
+                for i, value in enumerate(values)
+            },
+        })
+
+    if not records:
+        raise ValueError("مش لاقي طلاب عندهم إيميل وباسورد صالحين في ملف Excel.")
+    return records
+
+def build_updated_excel(file_bytes, students):
+    if not file_bytes:
+        raise ValueError("ملف Excel غير موجود.")
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+    ws = wb.active
+    cols, header_row = find_excel_columns(ws)
+    status_col = find_status_column_for_output(ws, header_row)
+    by_login = {}
+    by_row = {}
+
+    for student in students:
+        login = _excel_text(student.get("login_identifier")).casefold()
+        status = _excel_text(student.get("application_status"))
+        if login and status:
+            by_login[login] = status
+        if student.get("source_row_number") and status:
+            by_row[int(student["source_row_number"])] = status
+
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        email = _excel_text(ws.cell(row_idx, cols["email"] + 1).value).casefold()
+        status = by_login.get(email) or by_row.get(row_idx)
+        if status:
+            ws.cell(row_idx, status_col).value = status
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+# =========================================================
+# END EXCEL
+# =========================================================
+
+# =========================================================
+# GOOGLE DRIVE
+# =========================================================
+
+def get_google_credentials(scopes):
+
+    if Credentials is None:
+        raise RuntimeError(
+            "Google credentials libraries unavailable"
+        )
+
+    creds_dict = st.secrets.get(
+        "gcp_service_account"
+    )
+
+    if isinstance(creds_dict, dict):
+
+        return (
+            Credentials
+            .from_service_account_info(
+                creds_dict,
+                scopes=scopes
+            )
+        )
+
+    raw = st.secrets.get(
+        "GCP_SERVICE_ACCOUNT_JSON",
+        os.getenv("GCP_SERVICE_ACCOUNT_JSON")
+    )
+
+    if raw:
+
+        return (
+            Credentials
+            .from_service_account_info(
+                json.loads(raw),
+                scopes=scopes
+            )
+        )
+
+    raise RuntimeError(
+        "Google service account configuration missing"
+    )
+
 
 def drive_service():
 
