@@ -3797,11 +3797,11 @@ if (
     st.markdown(
         """
 <div style='text-align:center;margin:36px 0 22px'>
-    <div style='font-size:46px'>✨</div>
-    <div style='font-size:31px;font-weight:800'>Aivora</div>
-    <div style='font-size:14px;color:#6b7280'>
+<div style='font-size:46px'>✨</div>
+<div style='font-size:31px;font-weight:800'>Aivora</div>
+<div style='font-size:14px;color:#6b7280'>
         Your Smarter Support for Every Student's Application
-    </div>
+</div>
 </div>
 """,
         unsafe_allow_html=True
@@ -4015,11 +4015,11 @@ if st.session_state.is_admin:
     st.markdown(
         """
 <div class='hero'>
-    <div class='hero-kicker'>الإدارة</div>
-    <div class='hero-title'>لوحة الإدارة</div>
-    <div class='hero-desc'>
+<div class='hero-kicker'>الإدارة</div>
+<div class='hero-title'>لوحة الإدارة</div>
+<div class='hero-desc'>
         إدارة الحسابات الجديدة ومتابعة حالة المكاتب.
-    </div>
+</div>
 </div>
 """,
         unsafe_allow_html=True
@@ -4031,9 +4031,9 @@ if st.session_state.is_admin:
         f"""
 <div class='section-title'>
     الحسابات المعلقة
-    <span style='color:#2563eb'>
+<span style='color:#2563eb'>
         ({len(pending)})
-    </span>
+</span>
 </div>
 """,
         unsafe_allow_html=True
@@ -4147,20 +4147,21 @@ office_id = office["id"]
 # =========================================================
 
 st.markdown(
-    """<div class="topbar">
-    <div class="brand">
-        <div class="brand-icon">✨</div>
-        <div>
-            <div class="brand-title">Aivora</div>
-            <div class="brand-sub">
+    """
+<div class="topbar">
+<div class="brand">
+<div class="brand-icon">✨</div>
+<div>
+<div class="brand-title">Aivora</div>
+<div class="brand-sub">
                 Your Smarter Support for Every Student's Application
-            </div>
-        </div>
-    </div>
+</div>
+</div>
+</div>
 
-    <div style="font-size:13px;color:#6b7280;">
+<div style="font-size:13px;color:#6b7280;">
         نظام متابعة المكاتب
-    </div>
+</div>
 </div>
 """,
     unsafe_allow_html=True
