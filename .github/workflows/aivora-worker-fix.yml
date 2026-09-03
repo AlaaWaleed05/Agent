@@ -1,0 +1,137 @@
+name: Aivora worker fix
+
+on:
+  push:
+    paths:
+      - ".github/aivora_worker_fix_trigger.txt"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Patch worker without replacing the file
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("worker.py")
+          s = p.read_text(encoding="utf-8")
+
+          if 'EXCEL_BUCKET = "excel-files"' not in s:
+              marker = 'DRIVE_FOLDER_ID = (\n    os.environ.get("DRIVE_FOLDER_ID")\n    or "12L_qSHBnW4-tfQZRteynInWNBAML016f"\n)\n'
+              if marker not in s:
+                  raise RuntimeError("Could not find worker constants")
+              s = s.replace(marker, marker + '\nEXCEL_BUCKET = "excel-files"\n', 1)
+
+          # Replace ONLY the worker's live Excel updater. Google Sheets code is untouched.
+          pattern = r'def update_excel_student_status\(source_ref, student, status\):.*?(?=\n\n# ============================================================\n# LIVE GOOGLE SHEET UPDATE)'
+          replacement = '''def update_excel_student_status(source_ref, student, status):
+    source_ref = _excel_text(source_ref)
+    if not source_ref:
+        raise RuntimeError("excel_source_missing")
+
+    file_bytes = (
+        db
+        .storage
+        .from_(EXCEL_BUCKET)
+        .download(source_ref)
+    )
+    if not file_bytes:
+        raise RuntimeError("excel_download_empty")
+
+    wb = openpyxl.load_workbook(
+        io.BytesIO(file_bytes),
+        data_only=False
+    )
+    ws = wb.active
+
+    cols, header_row = find_excel_columns_for_output(ws)
+    status_col = find_status_column(ws, header_row)
+
+    login = _excel_text(
+        student.get("login_identifier")
+    ).casefold()
+    source_row = student.get("source_row_number")
+    target_row = None
+
+    if source_row:
+        candidate = int(source_row)
+        if header_row < candidate <= ws.max_row:
+            candidate_login = _excel_text(
+                ws.cell(candidate, cols["email"] + 1).value
+            ).casefold()
+            if candidate_login == login:
+                target_row = candidate
+
+    if target_row is None and login:
+        for row_idx in range(header_row + 1, ws.max_row + 1):
+            row_login = _excel_text(
+                ws.cell(row_idx, cols["email"] + 1).value
+            ).casefold()
+            if row_login == login:
+                target_row = row_idx
+                break
+
+    if target_row is None:
+        raise RuntimeError("excel_student_row_missing")
+
+    ws.cell(target_row, status_col).value = str(status or "")
+
+    output = io.BytesIO()
+    wb.save(output)
+    updated_bytes = output.getvalue()
+    if not updated_bytes:
+        raise RuntimeError("excel_updated_file_empty")
+
+    db.storage.from_(EXCEL_BUCKET).upload(
+        source_ref,
+        updated_bytes,
+        {
+            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "upsert": "true",
+        },
+    )
+
+    print(
+        f"    ✓ Excel live update: {student.get('student_name') or login}"
+    )
+'''
+          s, n = re.subn(pattern, replacement, s, count=1, flags=re.S)
+          if n != 1:
+              raise RuntimeError("Could not patch worker Excel updater")
+
+          # Keep exactly one normal browser for the whole first pass.
+          # Existing cancellation checks and final safe_quit remain intact.
+          s = s.replace(
+              'if needs_browser_restart:',
+              'if False and needs_browser_restart:',
+          )
+
+          compile(s, "worker.py", "exec")
+          p.write_text(s, encoding="utf-8")
+          PY
+
+      - name: Validate
+        run: python -m py_compile worker.py
+
+      - name: Commit worker only and remove one-time patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add worker.py
+          git rm -f .github/aivora_worker_fix_trigger.txt .github/workflows/aivora-worker-fix.yml
+          git commit -m "Fix worker Excel storage and single-browser lifecycle"
+          git push origin main
