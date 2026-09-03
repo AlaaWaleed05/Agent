@@ -27,8 +27,6 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 import openpyxl
 from cryptography.fernet import Fernet
@@ -67,10 +65,6 @@ WORKER_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
 
 CONFIG_FILE = Path(__file__).with_name("service_account.json")
 
-DRIVE_FOLDER_ID = (
-    os.environ.get("DRIVE_FOLDER_ID")
-    or "12L_qSHBnW4-tfQZRteynInWNBAML016f"
-)
 
 EXCEL_BUCKET = "excel-files"
 
@@ -155,18 +149,8 @@ def get_google_credentials(scopes):
     )
 
 
-def drive_service():
-    return build(
-        "drive",
-        "v3",
-        credentials=get_google_credentials(
-            ["https://www.googleapis.com/auth/drive"]
-        ),
-    )
-
-
 # ============================================================
-# GOOGLE DRIVE / EXCEL
+# EXCEL / SUPABASE STORAGE
 # ============================================================
 
 def _excel_text(value):
@@ -227,70 +211,32 @@ def find_status_column(ws, header_row):
     ws.cell(header_row, new_col).value = "حالة الطلب"
     return new_col
 
-def download_drive_file_bytes(file_id):
-    file_id = _excel_text(file_id)
-    if not file_id:
+def download_excel_from_storage(file_path):
+    file_path = _excel_text(file_path)
+    if not file_path:
         raise RuntimeError("excel_source_missing")
-    service = drive_service()
-    buffer = io.BytesIO()
-    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-    downloader = MediaIoBaseDownload(buffer, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    buffer.seek(0)
-    data = buffer.getvalue()
+    data = db.storage.from_(EXCEL_BUCKET).download(file_path)
     if not data:
         raise RuntimeError("excel_download_empty")
     return data
 
-def upload_drive_file_bytes(file_bytes, filename):
+def upload_excel_to_storage(file_path, file_bytes):
+    file_path = _excel_text(file_path)
+    if not file_path:
+        raise RuntimeError("excel_source_missing")
     if not file_bytes:
         raise RuntimeError("excel_upload_empty")
-    service = drive_service()
-    metadata = {"name": str(filename or "students.xlsx"), "parents": [DRIVE_FOLDER_ID]}
-    media = MediaIoBaseUpload(
-        io.BytesIO(file_bytes),
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        resumable=False,
+    return db.storage.from_(EXCEL_BUCKET).upload(
+        file_path,
+        file_bytes,
+        {
+            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "upsert": "true",
+        },
     )
-    result = service.files().create(
-        body=metadata,
-        media_body=media,
-        supportsAllDrives=True,
-        fields="id",
-    ).execute()
-    file_id = str(result.get("id") or "").strip()
-    if not file_id:
-        raise RuntimeError("excel_drive_upload_missing_id")
-    return file_id
-
-def build_updated_excel(file_bytes, students):
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
-    ws = wb.active
-    cols, header_row = find_excel_columns_for_output(ws)
-    status_col = find_status_column(ws, header_row)
-    by_login = {}
-    by_row = {}
-    for student in students:
-        login = _excel_text(student.get("login_identifier")).casefold()
-        status = _excel_text(student.get("application_status"))
-        if login and status:
-            by_login[login] = status
-        if student.get("source_row_number") and status:
-            by_row[int(student["source_row_number"])] = status
-    for row_idx in range(header_row + 1, ws.max_row + 1):
-        email = _excel_text(ws.cell(row_idx, cols["email"] + 1).value).casefold()
-        status = by_login.get(email) or by_row.get(row_idx)
-        if status:
-            ws.cell(row_idx, status_col).value = status
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output.getvalue()
 
 # ============================================================
-# END GOOGLE DRIVE / EXCEL
+# END EXCEL / SUPABASE STORAGE
 # ============================================================
 
 # ============================================================
@@ -466,39 +412,18 @@ def finalize_job_output(job):
         ).strip()
 
         if not source_ref:
-            raise RuntimeError(
-                "excel_source_missing"
-            )
+            raise RuntimeError("excel_source_missing")
 
-        original = download_drive_file_bytes(
-            source_ref
-        )
-
-        updated = build_updated_excel(
-            original,
-            students
-        )
-
-        final_id = upload_drive_file_bytes(
-            updated,
-            job.get("file_name")
-            or "students_updated.xlsx"
-        )
-
+        # Excel is updated live in the same Supabase Storage object
+        # after each student. No second output file is created.
         db.table("jobs").update({
-            "final_drive_file_id": final_id,
             "error": None
         }).eq(
             "id",
             job["id"]
         ).execute()
 
-        print(
-            f"Final Excel uploaded for job "
-            f"{job['id']}: {final_id}"
-        )
-
-        return final_id
+        return source_ref
 
     if source_type == "google_sheet":
 
