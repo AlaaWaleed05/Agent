@@ -9,10 +9,8 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
-
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 import bcrypt
 import openpyxl
@@ -35,9 +33,9 @@ SITE_URL = "https://admission.study-in-egypt.gov.eg"
 
 WORKER_WAIT_SECONDS = 30
 
-DRIVE_FOLDER_ID = os.getenv(
-    "DRIVE_FOLDER_ID",
-    "12L_qSHBnW4-tfQZRteynInWNBAML016f"
+SUPABASE_STORAGE_BUCKET = os.getenv(
+    "SUPABASE_STORAGE_BUCKET",
+    "excel-files"
 )
 
 # Keep fallback pacing aligned with the Worker timing policy.
@@ -682,176 +680,90 @@ def encrypt_password(password, key):
 
 
 # =========================================================
-# GOOGLE DRIVE
+# SUPABASE STORAGE (EXCEL FILES)
+# Replaces Google Drive as the storage backend for the
+# uploaded Excel workbook. The "source_ref" / "file_path"
+# value stored in data_sources / jobs is now a Supabase
+# Storage object path inside SUPABASE_STORAGE_BUCKET,
+# instead of a Google Drive file id. Everything else in the
+# app (jobs, live updates, downloads) works exactly the same
+# way it did with Drive, since these functions keep the same
+# names and the same "give bytes / take bytes" contract.
 # =========================================================
 
-def get_google_credentials(scopes):
+EXCEL_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-"
+    "officedocument.spreadsheetml.sheet"
+)
 
-    if Credentials is None:
-        raise RuntimeError(
-            "Google credentials libraries unavailable"
-        )
 
-    # Prefer direct Streamlit secret variables when they are available.
-    # This keeps GCP credentials independent from the nested TOML section.
-    direct = {
-        "type": "service_account",
-        "project_id": st.secrets.get(
-            "GCP_PROJECT_ID",
-            os.getenv("GCP_PROJECT_ID")
-        ),
-        "private_key_id": st.secrets.get(
-            "GCP_PRIVATE_KEY_ID",
-            os.getenv("GCP_PRIVATE_KEY_ID")
-        ),
-        "private_key": st.secrets.get(
-            "GCP_PRIVATE_KEY",
-            os.getenv("GCP_PRIVATE_KEY")
-        ),
-        "client_email": st.secrets.get(
-            "GCP_CLIENT_EMAIL",
-            os.getenv("GCP_CLIENT_EMAIL")
-        ),
-        "client_id": st.secrets.get(
-            "GCP_CLIENT_ID",
-            os.getenv("GCP_CLIENT_ID")
-        ),
-        "auth_uri": st.secrets.get(
-            "GCP_AUTH_URI",
-            os.getenv("GCP_AUTH_URI", "https://accounts.google.com/o/oauth2/auth")
-        ),
-        "token_uri": st.secrets.get(
-            "GCP_TOKEN_URI",
-            os.getenv("GCP_TOKEN_URI", "https://oauth2.googleapis.com/token")
-        ),
-    }
+def storage_bucket():
 
-    if direct.get("client_email") and direct.get("private_key"):
-        if isinstance(direct["private_key"], str):
-            direct["private_key"] = direct["private_key"].replace("\\n", "\n")
-        return Credentials.from_service_account_info(
-            direct,
-            scopes=scopes
-        )
-
-    # Keep the existing nested secret as a fallback so Google Sheets keeps working.
-    creds_dict = st.secrets.get("gcp_service_account")
-
-    if creds_dict:
-        try:
-            creds_dict = dict(creds_dict)
-        except Exception:
-            pass
-
-        if (
-            hasattr(creds_dict, "get")
-            and creds_dict.get("client_email")
-            and creds_dict.get("private_key")
-        ):
-            return Credentials.from_service_account_info(
-                creds_dict,
-                scopes=scopes
-            )
-
-    raw = st.secrets.get(
-        "GCP_SERVICE_ACCOUNT_JSON",
-        os.getenv("GCP_SERVICE_ACCOUNT_JSON")
-    )
-
-    if raw:
-        data = (
-            json.loads(raw)
-            if isinstance(raw, str)
-            else dict(raw)
-        )
-        return Credentials.from_service_account_info(
-            data,
-            scopes=scopes
-        )
-
-    raise RuntimeError(
-        "Google service account configuration missing"
-    )
-
-def drive_service():
-
-    return build(
-        "drive",
-        "v3",
-        credentials=get_google_credentials(
-            [
-                "https://www.googleapis.com/auth/drive"
-            ]
-        )
+    return (
+        db()
+        .storage
+        .from_(SUPABASE_STORAGE_BUCKET)
     )
 
 
-def upload_to_drive(
+def upload_excel_to_storage(
     file_bytes,
     filename,
     office
 ):
+    """
+    Uploads an Excel file to Supabase Storage and returns the
+    storage object path. This path is saved as source_ref /
+    file_path and used later to read/update/download the file,
+    exactly like the Google Drive file id used to be.
+    """
 
-    service = drive_service()
-
-    drive_filename = str(
-        filename or "students.xlsx"
+    safe_name = re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "_",
+        str(filename or "students.xlsx")
     )
 
-    metadata = {
-        "name": drive_filename,
-        "parents": [DRIVE_FOLDER_ID]
-    }
+    storage_path = f"{uuid.uuid4().hex}_{safe_name}"
 
-    media = MediaIoBaseUpload(
-        io.BytesIO(file_bytes),
-        mimetype=(
-            "application/vnd.openxmlformats-"
-            "officedocument.spreadsheetml.sheet"
-        ),
-        resumable=True,
+    storage_bucket().upload(
+        storage_path,
+        file_bytes,
+        {
+            "content-type": EXCEL_CONTENT_TYPE,
+            "upsert": "true",
+        },
     )
 
-    return (
-        service
-        .files()
-        .create(
-            body=metadata,
-            media_body=media,
-            fields="id"
-        )
-        .execute()["id"]
+    return storage_path
+
+
+def download_excel_from_storage(file_id):
+    """
+    Downloads Excel file bytes from Supabase Storage.
+    'file_id' is actually the Supabase Storage object path
+    returned earlier by upload_excel_to_storage.
+    """
+
+    return storage_bucket().download(str(file_id))
+
+
+def replace_excel_in_storage(file_id, file_bytes):
+    """
+    Overwrites the Excel file already stored in Supabase
+    Storage at 'file_id' (the storage object path) with new
+    bytes. This is the Supabase equivalent of the old
+    service.files().update(...) live-Drive-update call.
+    """
+
+    storage_bucket().upload(
+        str(file_id),
+        file_bytes,
+        {
+            "content-type": EXCEL_CONTENT_TYPE,
+            "upsert": "true",
+        },
     )
-
-
-def download_drive_file_bytes(file_id):
-
-    service = drive_service()
-
-    buffer = io.BytesIO()
-
-    request = (
-        service
-        .files()
-        .get_media(
-            fileId=str(file_id)
-        )
-    )
-
-    downloader = MediaIoBaseDownload(
-        buffer,
-        request
-    )
-
-    done = False
-
-    while not done:
-
-        _, done = downloader.next_chunk()
-
-    buffer.seek(0)
-
-    return buffer.getvalue()
 
 
 # =========================================================
@@ -1185,7 +1097,7 @@ def finalize_job_output(job):
         if not job_is_active(job_id):
             return None
 
-        original = download_drive_file_bytes(
+        original = download_excel_from_storage(
             source_ref
         )
 
@@ -1201,7 +1113,7 @@ def finalize_job_output(job):
         if not job_is_active(job_id):
             return None
 
-        final_id = upload_to_drive(
+        final_id = upload_excel_to_storage(
             updated,
             job.get("file_name")
             or "students.xlsx",
@@ -1332,7 +1244,7 @@ def import_students(
                 "ملف Excel غير موجود."
             )
 
-        file_path = upload_to_drive(
+        file_path = upload_excel_to_storage(
             file_bytes,
             source_name,
             ""
@@ -1392,7 +1304,7 @@ def import_students(
 
 # =========================================================
 # LIVE EXCEL UPDATE
-# SAME DRIVE FILE
+# SAME SUPABASE STORAGE FILE
 # =========================================================
 
 def update_excel_student_status(
@@ -1406,7 +1318,7 @@ def update_excel_student_status(
             "excel_source_missing"
         )
 
-    file_bytes = download_drive_file_bytes(
+    file_bytes = download_excel_from_storage(
         source_ref
     )
 
@@ -1474,25 +1386,9 @@ def update_excel_student_status(
 
     updated_bytes = output.getvalue()
 
-    service = drive_service()
-
-    media = MediaIoBaseUpload(
-        io.BytesIO(updated_bytes),
-        mimetype=(
-            "application/vnd.openxmlformats-"
-            "officedocument.spreadsheetml.sheet"
-        ),
-        resumable=True,
-    )
-
-    (
-        service
-        .files()
-        .update(
-            fileId=str(source_ref),
-            media_body=media
-        )
-        .execute()
+    replace_excel_in_storage(
+        source_ref,
+        updated_bytes
     )
 
     safe_log(
@@ -4924,7 +4820,8 @@ def render_processing():
         # LIVE EXCEL FILE
         #
         # There is no finalization file anymore.
-        # The same source Drive file was updated live.
+        # The same source Excel file in Supabase Storage
+        # was updated live.
         # So download the same source file.
         # =====================================================
 
@@ -4955,7 +4852,7 @@ def render_processing():
                     ):
 
                         st.session_state.final_file_bytes_cache = (
-                            download_drive_file_bytes(
+                            download_excel_from_storage(
                                 live_file_id
                             )
                         )
