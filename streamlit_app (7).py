@@ -4181,21 +4181,22 @@ _greeting = (
 )
 
 st.markdown(
-    f""" <div class="hero">
-    <div class="hero-kicker">
+    f""" 
+<div class="hero">
+<div class="hero-kicker">
         {_greeting} 👋
-    </div>
+</div>
 
-    <div class="hero-title">
+<div class="hero-title">
         أهلاً بيك،
-        <strong>
+<strong>
             {office.get('name', '')}
-        </strong>
-    </div>
+</strong>
+</div>
 
-    <div class="hero-desc">
+<div class="hero-desc">
         تابع طلبات طلابك وحدّث الحالات من مكان واحد.
-    </div>
+</div>
 </div>
 """,
     unsafe_allow_html=True
