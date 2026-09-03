@@ -1,0 +1,196 @@
+name: Excel diagnostics patch
+
+on:
+  push:
+    paths:
+      - ".github/excel_debug_trigger.txt"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Add Excel diagnostics without changing the flow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("streamlit_app (7).py")
+          s = p.read_text(encoding="utf-8")
+
+          start = s.index("def import_students(")
+          end = s.index("\n\n# =========================================================\n# LIVE EXCEL UPDATE", start)
+
+          new_func = '''def import_students(
+    office_id,
+    source_type,
+    source_name,
+    file_bytes=None,
+    source_url=None
+):
+    # Keep the original import flow; only add detailed diagnostics.
+    stage = "start"
+    try:
+        if source_type in {"xlsx", "xls", "excel"}:
+            stage = "parse_excel"
+            safe_log(
+                f"[EXCEL PREP] stage=parse_excel office={office_id} "
+                f"file={source_name} bytes={len(file_bytes or b'')}"
+            )
+            records = parse_excel_bytes(file_bytes)
+            safe_log(
+                f"[EXCEL PREP] stage=parse_excel SUCCESS "
+                f"valid_students={len(records)}"
+            )
+        else:
+            stage = "read_google_sheet"
+            safe_log(f"[SOURCE PREP] stage=read_google_sheet office={office_id}")
+            rows = read_gsheet_rows(source_url)
+            if not rows:
+                raise ValueError("الشيت فاضي.")
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            for row in rows:
+                ws.append(row)
+            out = io.BytesIO()
+            wb.save(out)
+            stage = "parse_google_sheet_rows"
+            records = parse_excel_bytes(out.getvalue())
+
+        if not records:
+            raise ValueError("مش لاقي طلاب عندهم إيميل وباسورد صالحين.")
+
+        encryption_key = st.secrets.get(
+            "STUDENT_PASSWORD_ENCRYPTION_KEY",
+            os.getenv("STUDENT_PASSWORD_ENCRYPTION_KEY")
+        )
+        if not encryption_key:
+            raise RuntimeError("Encryption key missing")
+
+        source_type = (
+            "google_sheet"
+            if source_type in {"gsheet", "google_sheet"}
+            else "excel"
+        )
+
+        file_path = None
+        if source_type == "excel":
+            stage = "upload_excel_to_drive"
+            safe_log(
+                f"[EXCEL PREP] stage=upload_excel_to_drive "
+                f"file={source_name}"
+            )
+            file_path = upload_to_drive(
+                file_bytes,
+                source_name,
+                ""
+            )
+            safe_log(
+                f"[EXCEL PREP] stage=upload_excel_to_drive SUCCESS "
+                f"drive_file_id={file_path}"
+            )
+
+        stage = "create_data_source"
+        safe_log(
+            f"[EXCEL PREP] stage=create_data_source "
+            f"source_type={source_type} drive_file={file_path or '-'}"
+        )
+        source_response = (
+            db()
+            .table("data_sources")
+            .insert({
+                "office_id": office_id,
+                "source_type": source_type,
+                "source_name": source_name,
+                "source_url": source_url,
+                "file_path": file_path,
+                "column_mapping": {},
+            })
+            .execute()
+        )
+        source_rows = source_response.data or []
+        if not source_rows:
+            raise RuntimeError("data_source_insert_returned_empty")
+        source = source_rows[0]
+        safe_log(
+            f"[EXCEL PREP] stage=create_data_source SUCCESS "
+            f"source_id={source['id']}"
+        )
+
+        stage = "encrypt_student_passwords"
+        payload = []
+        for r in records:
+            payload.append({
+                "office_id": office_id,
+                "data_source_id": source["id"],
+                "source_row_number": r["source_row_number"],
+                "student_name": r["student_name"],
+                "login_identifier": r["login_identifier"],
+                "encrypted_password": encrypt_password(
+                    r["password"], encryption_key
+                ),
+                "application_status": "",
+                "original_data": r["original_data"],
+                "updated_at": now_iso(),
+            })
+
+        stage = "insert_student_records"
+        safe_log(
+            f"[EXCEL PREP] stage=insert_student_records "
+            f"count={len(payload)}"
+        )
+        student_response = (
+            db()
+            .table("student_records")
+            .insert(payload)
+            .execute()
+        )
+        safe_log(
+            f"[EXCEL PREP] stage=insert_student_records SUCCESS "
+            f"returned={len(student_response.data or [])}"
+        )
+
+        safe_log(
+            f"[EXCEL PREP] SUCCESS office={office_id} "
+            f"students={len(payload)} source_id={source['id']} "
+            f"drive_file={file_path or '-'}"
+        )
+        return source, len(payload)
+
+    except Exception as exc:
+        safe_log(
+            f"[EXCEL PREP] FAILED stage={stage} office={office_id} "
+            f"file={source_name}: {type(exc).__name__}: {exc}"
+        )
+        import traceback
+        traceback.print_exc()
+        raise
+'''
+
+          s = s[:start] + new_func + s[end:]
+          compile(s, "streamlit_app (7).py", "exec")
+          p.write_text(s, encoding="utf-8")
+          PY
+
+      - name: Verify
+        run: python -m py_compile "streamlit_app (7).py"
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "streamlit_app (7).py"
+          git commit -m "Add detailed Excel preparation diagnostics" || exit 0
+          git push origin main
